@@ -4,10 +4,10 @@ from typing import Union, List
 import ast
 import numpy as np
 
-from map import Map
-from environment import Environment
-from robot import Robot
-from classes import Position
+from src.map import Map
+from src.environment import Environment
+from src.environment_entities import Robot
+from src.classes import Position
 
 
 def main(map_yaml_path: Union[Path, str], robot_footprint):
@@ -35,19 +35,20 @@ def main(map_yaml_path: Union[Path, str], robot_footprint):
     robots = [
         Robot(robot_id=f"R{i}",
               start_pos=Position(pos[i-1][0], pos[i-1][1], pos[i-1][2]),
-              footprint=footprint)
+              footprint=footprint,
+              map=map)
               for i in range(1, len(pos) + 1)
     ]
+
+    #robots[3].goal = Position(-10.0, -6.0, 3.14)
 
     # create environment
     env = Environment(map, robots, visualize=True)
 
     while True:
-        try:
-            env.step()
+        try:            
+            env.step(dt=0.5)
             env.visualize()
-            for r in robots:
-                r.move(0.26, 0.35, 0.1)
         except KeyboardInterrupt:
             break
 

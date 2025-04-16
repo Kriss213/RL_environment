@@ -2,3 +2,5 @@ gym
 numpy
 pygame
 shapely
+scipy
+scikit-image

@@ -1,6 +1,9 @@
 from typing import List, Tuple, Dict, Optional, Any, Union
-import gym
 import numpy as np
+
+from shapely.geometry import Polygon
+from scipy.ndimage import binary_dilation
+from skimage.draw import polygon
 
 import yaml
 from PIL import Image, ImageOps
@@ -59,17 +62,12 @@ class Map:
 
             origin = tuple(config['origin']) # (x, y, theta)
 
-        img = Image.open(map_pgm_path)#.convert('L')
-        
-        # bullshit fix for bullshit problem
-        # img = img.rotate(-90, expand=True)
-        # img = img.transpose(Image.FLIP_LEFT_RIGHT)
+        img = Image.open(map_pgm_path)
             
         img_array = np.asarray(img)
         
         return img_array, resolution, origin
 
-    
     def world_to_map(self, x:float, y:float) -> Tuple[int, int]:
         """
         Converts world coordinates (meters) to map grid indices.
@@ -92,6 +90,75 @@ class Map:
         x = mx * self.resolution + self.origin[0]
         y = (self.height-my) * self.resolution + self.origin[1]
         return x, y
+
+    def check_map_collisions(self, robot) -> bool:
+        """
+        Checks if robot collides with the envirnment.
+
+        Args:
+            robot (Robot): Robot object.
+
+        Returns:
+            True if there is a collision, False otherwise.
+        """
+        map_data = self.map
+        # colliding = []
+
+        #for idx, robot in enumerate(self.robots, start=1):
+        poly = Polygon(robot.get_bbox())
+        minx, miny, maxx, maxy = poly.bounds
+
+        # Convert bounding rectangle to grid range
+        min_col, min_row = self.world_to_map(minx, miny)
+        max_col, max_row = self.world_to_map(maxx, maxy)
+
+        row_start, row_end = min(min_row, max_row), max(min_row, max_row)
+        col_start, col_end = min(min_col, max_col), max(min_col, max_col)
+
+        # TODO this checks if a axis aligned rectangle is out of bounds
+        # this should check if the point belongs to robot polygon
+        sub_map = map_data[row_start:row_end+1, col_start:col_end+1]
+        return np.any(sub_map != self.FREE)
+    
+    def inflate_map(self, footprint:np.ndarray) -> None:
+        """
+        Inflates the map based on the robot's footprint polygon (in meters).
+        Marks inflated (but not originally occupied) cells as UNACESSIBLE.
+
+        Args:
+            footprint : np.ndarray of shape (4, 2) in meters. Robot's footprint.
+        """
+        
+
+        # Get footprint polygon (in meters, relative to robot center)
+        footprint_m = footprint  # shape (4, 2)
+        resolution = self.resolution
+
+        # Convert to grid coordinates relative to center
+        footprint_cells = footprint_m / resolution
+
+        # Shift so it's all positive (for rasterizing)
+        min_x = int(np.floor(np.min(footprint_cells[:, 0])))
+        min_y = int(np.floor(np.min(footprint_cells[:, 1])))
+        shifted = footprint_cells - np.array([min_x, min_y])
+        h = int(np.ceil(np.max(shifted[:, 1]))) + 1
+        w = int(np.ceil(np.max(shifted[:, 0]))) + 1
+
+        rr, cc = polygon(shifted[:, 1], shifted[:, 0], shape=(h, w))
+        mask = np.zeros((h, w), dtype=bool)
+        mask[rr, cc] = 1  # structuring element
+
+        # Binary obstacle map
+        obstacle_mask = (self.map <= self.OCCUPIED_THRESHOLD).astype(bool)
+
+        # Dilate using the footprint
+        inflated = binary_dilation(obstacle_mask, structure=mask)
+
+        # Update map: mark inflated (but not original) as UNACESSIBLE
+        self.inflated_map =np.copy(self.map)
+        self.inflated_map[(inflated == 1) & (obstacle_mask == 0)] = self.UNACESSIBLE
+        print("Inflation complete.")
+        
 
 # test code
 if __name__ == "__main__":

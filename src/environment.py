@@ -2,6 +2,7 @@
 A simulated warehouse enviornment
 """
 
+import heapq
 from typing import List, Tuple, Dict, Optional, Any, Union
 import gym
 import numpy as np
@@ -12,8 +13,9 @@ from PIL import Image
 from pathlib import Path
 
 
-from robot import Robot
-from map import Map
+from src.environment_entities import Robot
+from src.map import Map
+from src.classes import Position
 
 import pygame
 
@@ -52,41 +54,8 @@ class Environment(gym.Env):
                     continue
                 if poly1.intersects(poly2):
                     collisions.append((rob_id_1, rob_id_2))
-        return collisions
-
-    def _check_map_collisions(self) -> List[int]:
-        """
-        Checks if any robot has an obstacle pixel inside its bounding box.
-
-        Returns:
-            List of robot indices that collide with map obstacles.
-        """
-        map_data = self.map()
-        colliding = []
-
-        for idx, robot in enumerate(self.robots, start=1):
-            poly = Polygon(robot.get_bbox())
-            minx, miny, maxx, maxy = poly.bounds
-
-            # Convert bounding rectangle to grid range
-            min_col, min_row = self.map.world_to_map(minx, miny)
-            max_col, max_row = self.map.world_to_map(maxx, maxy)
-
-            row_start, row_end = min(min_row, max_row), max(min_row, max_row)
-            col_start, col_end = min(min_col, max_col), max(min_col, max_col)
-
-
-            for row in range(row_start, row_end + 1):
-                for col in range(col_start, col_end + 1):
-                    if map_data[row, col] != self.map.FREE:
-                        colliding.append(robot.id)
-                        break
-                else:
-                    continue
-                break
-
-        return colliding
-   
+        return collisions 
+    
     def visualize(self):
         """
         Visualizes the environment and the robots.
@@ -105,28 +74,34 @@ class Environment(gym.Env):
         font = pygame.font.SysFont('Comic Sans MS', 24)
 
         for robot in self.robots:
+            # =====VISUALIZE ROBOT=====
             # get robot bounding box
             bbox = robot.get_bbox() # this is in meters
-
             # convert to pixel coords
             bbox_map = []
             for point in bbox:
                 # convert to map coordinates
                 mx, my = self.map.world_to_map(*point[:2])
                 bbox_map.append((mx, my))
-
-
             # robot pos in pixel coords
             robot_pos = self.map.world_to_map(*robot.position()[:2])
-
             # draw the robot on the screen
             pygame.draw.polygon(self.__screen, BLUE, bbox_map)
             pygame.draw.circle(self.__screen, RED, robot_pos[:2], 5)
-
             # add robot name
             text_surface = font.render(robot.id, True, RED)
             # place label in middle of robot box
             self.__screen.blit(text_surface, np.sum(bbox_map, axis=0) // 4)
+
+            # =====VISUALIZE PATH=====
+            if robot.path:# is not None and len(robot.path) > 0:
+                path_map = [self.map.world_to_map(*robot.position()[:2])]
+                for point in robot.path:
+                    # convert to map coordinates
+                    mx, my = self.map.world_to_map(*point[:2])
+                    path_map.append((mx, my))
+                # draw the path on the screen
+                pygame.draw.lines(self.__screen, (0, 255, 0), False, path_map, 2)
 
         # update display loop
         for event in pygame.event.get():
@@ -134,6 +109,11 @@ class Environment(gym.Env):
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:  # Left click
                 pixel_pos = pygame.mouse.get_pos()
                 world_pos = self.map.map_to_world(*pixel_pos)
+
+                pos = Position(*world_pos, theta=0.0)
+                # DEBUG
+                # send robot 1 to pos
+                self.robots[0].goal = pos
 
                 print(f"Clicked pixel: {pixel_pos}")
                 print(f"Clicked world: {world_pos}")
@@ -190,7 +170,12 @@ class Environment(gym.Env):
         """
         # check for collisions
         collisions = self._check_robot_collisions()
-        map_collisions = self._check_map_collisions()
+        for robot in self.robots:
+            self.map.check_map_collisions(robot=robot)
+
+        for robot in self.robots:
+            robot.follow_path(dt)
+
         #if collisions:
         #print(f"Collisions detected: {collisions}")
         # if map_collisions:
