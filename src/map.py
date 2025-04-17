@@ -158,7 +158,21 @@ class Map:
         self.inflated_map =np.copy(self.map)
         self.inflated_map[(inflated == 1) & (obstacle_mask == 0)] = self.UNACESSIBLE
         print("Inflation complete.")
-        
+    
+    def downsample_map(self, grid:np.ndarray, factor: int) -> np.ndarray:
+        """
+        Downsamples a binary grid using max pooling.
+        Args:
+            factor: Downsampling factor.
+        Returns:
+            Coarse np.ndarray.
+        """
+        #grid = self.map
+        h, w = grid.shape
+        h_ds = h // factor
+        w_ds = w // factor
+        grid_ds = grid[:h_ds*factor, :w_ds*factor].reshape(h_ds, factor, w_ds, factor)
+        return grid_ds.max(axis=(1, 3))
 
 # test code
 if __name__ == "__main__":
@@ -170,3 +184,7 @@ if __name__ == "__main__":
     print(f"Map data:\n{map.map}")
     print(f"max value: {map.map.max()} min_value: {map.map.min()}")
     Image.fromarray(map.map).show()
+
+    inflated_map = map.inflate_map(footprint=np.array([[0.81, 0.46], [-0.31, 0.46], [-0.31, -0.46], [0.81, -0.46]]))
+    downsampled_map = map.downsample_map(map.inflated_map, factor=16)
+    Image.fromarray(downsampled_map).show()

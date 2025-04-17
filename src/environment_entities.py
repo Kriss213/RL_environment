@@ -8,6 +8,7 @@ from skimage.draw import line
 from src.classes import Position
 from src.map import Map
 
+np.random.seed(42)
 
 class Robot:
     MAX_LIN_VEL = 0.26 # m/s
@@ -17,8 +18,11 @@ class Robot:
                  start_pos: Position,
                  map: Map,
                  footprint: Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float], Tuple[float, float]],
+                 dist_tolerance:float,
+                 heading_tolerance:float,
+                 map_scale_factor,
+                 logging:bool=False,
                  task_allocation: Union[Any] = None, #TODO
-                 velocity: float = 1.0, # m/s # TODO
                 ):
         """
         Initializes a robot.
@@ -34,14 +38,27 @@ class Robot:
         self.id:str = robot_id
         self.position:Position = start_pos
         self.map:Map = map
+        self.logging=logging
+
+        # self.tasks:List[Task]
+        self.active_task:Task = None
         
-        self.velocity:float = velocity
         self.footprint = np.array(footprint)
 
         self.path:List[Tuple[float, float]] = []
         self._goal = None
 
-        self.map.inflate_map(self.footprint)
+        # generate an inflated map for task planning
+        # add 5cm to footprint so robot plans
+        # even further from walls
+        self.map.inflate_map(self.footprint + 0.05)
+
+        self.scale_factor = map_scale_factor
+        self.planning_map = self.map.downsample_map(self.map.inflated_map, factor=map_scale_factor)
+
+        # goal tolerance
+        self.dist_tolerance:float = dist_tolerance
+        self.head_tolerance:float = heading_tolerance
 
     @property
     def goal(self) -> Position:
@@ -55,7 +72,8 @@ class Robot:
             self._goal = value
             self.__plan_path()
             if self.path:
-                print(f"Path planned for robot {self.id}. Length: {len(self.path)} points")
+                if self.logging:
+                    print(f"Path planned for robot {self.id}. Length: {len(self.path)} points")
                 # simplify path will need to be tested since
                 # ROS2 plans path with a lot of points
 
@@ -85,6 +103,9 @@ class Robot:
         self.goal = None
         self.path = []
 
+    def clear_goal(self):
+        self._goal = None
+
     def move(self, lin_vel:float, ang_vel:float, dt:float):
         """
         Moves the robot using differential drive kinematics.
@@ -110,9 +131,11 @@ class Robot:
         """
         Plans a path for the robot to the goal using A* and stores it in self.path (world coordinates).
         """
-        print(f"Planning path for robot {self.id} from {self.position} to {self.goal}")
-        grid = self.map.inflated_map
-        height, width = self.map.height, self.map.width
+        if self.logging:
+            print(f"Planning path for robot {self.id} from {self.position} to {self.goal}")
+        grid = self.planning_map
+        #height, width = self.map.height, self.map.width
+        height, width = grid.shape
 
         start = self.position
         goal = self.goal
@@ -120,14 +143,24 @@ class Robot:
         sx, sy = self.map.world_to_map(start.x, start.y)
         gx, gy = self.map.world_to_map(goal.x, goal.y)
 
+        # scale map points
+        scale_factor = self.scale_factor
+        sx //= scale_factor
+        sy //= scale_factor
+        gx //= scale_factor
+        gy //= scale_factor
+
+
         if not (0 <= sx < width and 0 <= sy < height and 0 <= gx < width and 0 <= gy < height):
             self.path = None
-            print(f"Path planning failed for robot {self.id}. Start or goal out of bounds.")
+            if self.logging:
+                print(f"Path planning failed for robot {self.id}. Start or goal out of bounds.")
             return
         if grid[gy, gx] != self.map.FREE:
             #grid[sy, sx] != self.map.FREE or
             self.path = None
-            print(f"Path planning failed for robot {self.id}. Goal blocked.")
+            if self.logging:
+                print(f"Path planning failed for robot {self.id}. Goal blocked.")
             return
 
         def h(p1, p2):
@@ -160,7 +193,8 @@ class Robot:
                     path.append(current)
                 path.reverse()
 
-                self.path = [self.map.map_to_world(col, row) for col, row in path]
+                # scale map back up and return 
+                self.path = [self.map.map_to_world(col*scale_factor, row*scale_factor) for col, row in path]
                 return  # Found, exit early
 
             for dx, dy in neighbors:
@@ -176,8 +210,8 @@ class Robot:
                     f = tentative_g + h((nx, ny), (gx, gy))
                     heapq.heappush(open_set, (f, tentative_g, (nx, ny)))
                     came_from[(nx, ny)] = (cx, cy)
-
-        print(f"Path planning failed for robot {self.id}. No valid path found.")
+        if self.logging:
+            print(f"Path planning failed for robot {self.id}. No valid path found.")
         self.path = None  # No path found
 
     def __is_visible(self, p1, p2, grid) -> bool:
@@ -194,7 +228,7 @@ class Robot:
         """
        
         path = self.path
-        grid = self.map.inflated_map
+        grid = self.planning_map
 
         if not path:
             return []
@@ -239,7 +273,7 @@ class Robot:
         smoothed = list(zip(cs_x(distances), cs_y(distances)))
         return smoothed
 
-    def follow_path(self, dt: float, lin_gain: float = 1.0, ang_gain: float = 3.0, goal_tolerance: float = 0.1, heading_tolerance: float = 0.05):
+    def follow_path(self, dt: float, lin_gain: float = 1.0, ang_gain: float = 3.0):
         """
         Follows a given path using proportional control.
 
@@ -248,8 +282,6 @@ class Robot:
             dt (float): Time step in seconds.
             lin_gain (float): Linear velocity gain.
             ang_gain (float): Angular velocity gain.
-            goal_tolerance (float): Distance threshold to consider goal reached.
-            heading_tolerance (float): Angle threshold to consider heading aligned.
         """
         path = self.path
            
@@ -259,10 +291,20 @@ class Robot:
         heading_error = self.goal.theta - self.position.theta
         heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
 
+        distance_to_goal = np.hypot(*self.position()[:2]-self.goal()[:2])
+
+        if heading_error < self.head_tolerance and distance_to_goal < self.dist_tolerance:
+            self._goal = None
+            return
+
         # after reaching goal point rotate to correct orientation
-        if abs(heading_error) > heading_tolerance+1e-2 and not path:
+        if (abs(heading_error) > self.head_tolerance+1e-2 or \
+           distance_to_goal > self.dist_tolerance) and not path:
+            # dunno why but sometimes the path ends when robot is still not at goal
+            # this if also rotates closer to target heading when path is empty
+            
+            lin_vel = lin_gain * distance_to_goal
             # rotate closer to goal pos
-            lin_vel = 0.0
             ang_vel = ang_gain* heading_error
             self.move(lin_vel, ang_vel, dt)
             # Update heading error
@@ -279,7 +321,7 @@ class Robot:
         distance = np.hypot(dx, dy)
 
         # Check if waypoint reached
-        if distance < goal_tolerance:
+        if distance < self.dist_tolerance:
             heading_error = self.goal.theta - self.position.theta
             heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
 
@@ -301,23 +343,135 @@ class Robot:
         # Move robot
         self.move(lin_vel, ang_vel, dt)
 
+    #def update_task(self):
     
     # def get_next_path_points(self, n: int) -> List[Tuple[float, float]]:
     #     """Returns next N points from path."""
     #     return self.path[:n]
 
-    # def reached_goal(self) -> bool:
-    #     """Returns True if robot has reached its goal."""
-    #     return self.goal is not None and self.position == self.goal
+    def reached_target(self, target:Position) -> bool:
+        """Returns True if robot has reached its goal."""
+        heading_error = target.theta - self.position.theta
+        heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
+
+        distance_to_goal = np.hypot(*self.position()[:2]-target()[:2])
+
+        return heading_error < self.head_tolerance and distance_to_goal < self.dist_tolerance
+        
     
+class Task:
+    PENDING = 0
+    ASSIGNED = 1
+    AWAITING_PICKUP = 2
+    AT_PICKUP = 3
+    EN_ROUTE = 4
+    AT_DROPOFF = 5
+    DELIVERED = 6
+
+    def __init__(self,
+                 task_id:str,
+                 loader:"Loader",
+                 unloader:"Unloader",
+                 start_time:float):
+        self.id = task_id
+        self.loader:"Loader" = loader
+        self.unloader:"Unloader" = unloader
+        self.courier:Robot = None
+
+        self.status:int = self.PENDING
+        self.start_time:float = start_time
+        self.end_time:float = None
+
+        # track how long task has not been completed
+        self.elapsed_time:float = 0.0
+
+        # track load/unload time
+        self.elapsed_load_time:float = 0.0
+        self.elapsed_unload_time:float = 0.0
+
+    def update_task_time(self, dt:float):
+        """
+        Update task time
+        """
+        self.elapsed_time += dt
+
 class Loader:
     """
-    Spawns tasks and 
+    Loaders spawn tasks.
     """
-    pass
+    def __init__(self, loader_id:str, pos:Position, max_tasks:int, load_time:float):
+        """
+        Initializes a loader.
+        Args:
+            id (str): Unique identifier.
+            pos (Position): Position of the loader.
+        """
+        self.id = loader_id
+        self.tasks:List[Task] = []
+        self.position:Position = pos
+        self.task_allocation = None #TODO
+        self.task_spawn_chance = 0.01 # each time step
+        self.max_tasks = max_tasks
+        self.load_time = load_time
+        
+    def generate_task(self, id:str, unloader:"Unloader", start_time:float) -> bool:
+        """
+        Generates a task.
+        Args:
+            id (str): Unique identifier.
+            unloader (Position): Goal position.
+        """
 
+        if len(self.tasks) >= self.max_tasks:
+            return False
+        
+        loader = self
+        task = Task(id, loader, unloader, start_time=start_time)
+        self.tasks.append(task)
+        return True
+    
 class Unloader:
-    pass
+    """
+    Unloaders accept task drop offs.
+    """
+    def __init__(self, unloader_id:str, pos:Position, unload_time:float):
+        """
+        Initializes an unloader.
+        Args:
+            id (str): Unique identifier.
+            pos (Position): Position of the unloader.
+        """
+        self.id = unloader_id
+
+        #self.tasks:List[Task] = []
+        self.position:Position = pos
+        self.unload_time = unload_time
+
+class CBBA:
+    # TODO
+    def __init__(self):
+        pass
+
+    def assign_task(self, robot:Robot, loaders:List[Loader], runtime:float) -> bool:
+        """
+        Temporary simple logic to asign task to robot
+        """
+        if not robot.active_task is None:
+            return True
+        # shuffle loaders
+        np.random.shuffle(loaders)
+        for l in loaders:
+            for t in l.tasks:
+                if t.status == Task.PENDING:
+                    t.status = Task.ASSIGNED
+                    t.start_time = runtime
+                    robot.active_task = t
+                    return True
+                
+        return False
+                    
+            
+
 
 # test code
 if __name__ == "__main__":

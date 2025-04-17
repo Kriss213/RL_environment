@@ -6,48 +6,82 @@ import numpy as np
 
 from src.map import Map
 from src.environment import Environment
-from src.environment_entities import Robot
+from src.environment_entities import Robot, Loader, Unloader
 from src.classes import Position
 
 
-def main(map_yaml_path: Union[Path, str], robot_footprint):
+def main(config):
+    # Environment config
+    config_env = config['ENVIRONMENT']
+    map_yaml_path = config_env['map_yaml']
+    dt = float(config_env['dt'])
+    
+    # Robot config
+    config_robot = config['ROBOT']
+    robot_footprint = ast.literal_eval(config_robot['footprint'])
+    init_robot_poses = ast.literal_eval(config_robot['init_poses'])
+    dist_tolerance = float(config_robot['distance_tolerance'])
+    head_tolerance = float(config_robot['heading_tolerance'])
+    map_scale_factor = int(config_robot['plan_map_scale_factor'])
+
+    # Loader config
+    config_loader = config['LOADER']
+    init_loader_poses = ast.literal_eval(config_loader['init_poses'])
+    load_delay = float(config_loader['loading_delay'])
+    max_tasks = int(config_loader['max_tasks'])
+
+    # Unloader config
+    config_unloader = config['UNLOADER']
+    init_unloader_poses = ast.literal_eval(config_unloader['init_poses'])
+    unload_delay = float(config_unloader['unloading_delay'])
+    
+    
+    
+    
     # create map
     map = Map(map_yaml_path)
-
-    pos = [
-        (10.0, 6.0, -1.7),
-        (10.0, -6.0, 1.7),
-        (-11.0, -5.0, 0.0),
-        (-7.0, 0.5, 0.0),
-        (2.75, -0.6, 3.14)
-    ]
-
-    # pos = [ 
-    #     (10.0, 6.0, -1.7),
-    #     (10.0, 4.2, 1.7),
-    #     (-11.0, -5.0, 0.0),
-    #     (-10.0, -6.0, 3.14),
-    #     (2.75, -0.6, 3.14)
-    # ]
 
     # create robots
     footprint = robot_footprint
     robots = [
         Robot(robot_id=f"R{i}",
-              start_pos=Position(pos[i-1][0], pos[i-1][1], pos[i-1][2]),
+              start_pos=Position(init_robot_poses[i-1][0], init_robot_poses[i-1][1], init_robot_poses[i-1][2]),
               footprint=footprint,
-              map=map)
-              for i in range(1, len(pos) + 1)
+              dist_tolerance=dist_tolerance,
+              heading_tolerance=head_tolerance,
+              map=map, 
+              map_scale_factor=map_scale_factor,
+              logging=False)
+              for i in range(1, len(init_robot_poses) + 1)
     ]
 
-    #robots[3].goal = Position(-10.0, -6.0, 3.14)
+    # create loaders
+    loaders = [
+        Loader(loader_id=f"L{i}",
+               pos=Position(init_loader_poses[i-1][0], init_loader_poses[i-1][1], init_loader_poses[i-1][2]),
+               load_time=load_delay,
+               max_tasks=max_tasks)
+               for i in range(1, len(init_loader_poses) + 1)
+    ]
+    # create unloaders
+    unloaders = [
+        Unloader(unloader_id=f"U{i}",
+                 pos=Position(init_unloader_poses[i-1][0], init_unloader_poses[i-1][1], init_unloader_poses[i-1][2]),
+                 unload_time=unload_delay)
+                 for i in range(1, len(init_unloader_poses) + 1)
+    ]
 
     # create environment
-    env = Environment(map, robots, visualize=True)
+    env = Environment(map=map,
+                    robots=robots,
+                    loaders=loaders,
+                    unloaders=unloaders,
+                    visualize=True,
+                    logging=False)
 
     while True:
         try:            
-            env.step(dt=0.5)
+            env.step(dt=dt)
             env.visualize()
         except KeyboardInterrupt:
             break
@@ -57,15 +91,4 @@ if __name__ == "__main__":
     config = configparser.ConfigParser()
     config.read('config.ini')
     
-    # Environment config
-    config_env = config['ENVIRONMENT']
-    map_yaml_path = config_env['map_yaml']
-    
-    # Robot config
-    config_robot = config['ROBOT']
-    robot_footprint = ast.literal_eval(config_robot['footprint'])
-
-    main(
-        map_yaml_path,
-        robot_footprint
-        )
+    main(config)
