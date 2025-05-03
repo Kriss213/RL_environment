@@ -1,6 +1,8 @@
-gym
-numpy
+# on Python 3.10.12
+# on Ubuntu 22.04
+ray[rllib]==2.44.1
 pygame
-shapely
+gymansium
+torch
 scipy
 scikit-image
