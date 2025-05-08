@@ -274,10 +274,6 @@ class Robot:
         # this works okay if dt < 1.5
         ang_gain = 3.0 * np.e**(-4 * dt) + 0.5
         
-        # def angle_diff(a, b):
-        #     """Return the smallest angle difference between two headings (radians)."""
-        #     return (a - b + np.pi) % (2 * np.pi) - np.pi
-        
         if self.goal is None:
             return  # No goal defined
 
@@ -285,7 +281,7 @@ class Robot:
         goal_dy = self.goal.y - self.position.y
         dist_to_goal = np.hypot(goal_dx, goal_dy)
         
-        if not self.path and dist_to_goal < self.dist_tolerance:
+        if not self.path or dist_to_goal < self.dist_tolerance:
             # No path left - rotate toward final goal orientation
             
             #heading_error = angle_diff(self.goal.theta, self.position.theta)

@@ -9,7 +9,6 @@ Observation for single agent:
 - Own task goal
 - Other agents' positions, nav goals, and task goals (sorted by distance to self)
 
-Action for single step:
-[mode, (x,y,theta)]
-mode = 0 -> follow path
-mode = 1 -> plan path to (x,y,theta)
+Discrete action for single step:
+0 - stay idle
+1 - follow path

@@ -165,6 +165,8 @@ class CBBA:
                     print(f"[{courier.id}] Loading Task {active_task.id}... {elapsed_load_time:.2f}/{load_time:.2f}s")
                 if elapsed_load_time >= load_time:
                     active_task.status = active_task.EN_ROUTE
+                    unloader_pos = active_task.unloader.position
+                    active_task.active_goal = unloader_pos
                     if self.logging:
                         print(f"[{courier.id}] Finished loading Task {active_task.id}. Status → EN_ROUTE.")
                 else:
@@ -172,7 +174,6 @@ class CBBA:
 
             elif task_status == active_task.EN_ROUTE:
                 unloader_pos = active_task.unloader.position
-                active_task.active_goal = unloader_pos
                 # NOTE DEBUG:
                 # if courier.goal != unloader_pos:
                 #     courier.goal = unloader_pos

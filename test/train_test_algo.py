@@ -1,8 +1,9 @@
 import ray
 from ray import tune
 from ray.rllib.algorithms.ppo import PPOConfig
-from gymnasium.wrappers import HumanRendering
+# from ray.rllib.algorithms.dqn import DQNConfig
 from ray.tune.registry import register_env
+from ray.tune.logger import pretty_print
 
 import configparser
 
@@ -40,12 +41,12 @@ if __name__ == "__main__":
     # env.close()
     # exit()
 
-    config = (
+    algo_ppo = (
         PPOConfig()
         .environment(env="warehouse_env",env_config=env_config)
         .framework("torch")
         .env_runners(num_env_runners=0)#.rollouts(num_rollout_workers=0)
-        .resources(num_cpus_for_main_process=0)
+        #.resources(num_cpus_for_main_process=0)
         .learners(num_gpus_per_learner=1)
         .rl_module(model_config={
             'train_batch_size': 4000,
@@ -60,26 +61,35 @@ if __name__ == "__main__":
             },
             policy_mapping_fn=lambda agent_id, *args, **kwargs: "shared_policy"
         )
-        .evaluation(
-            evaluation_interval=100,
-            evaluation_duration=3,
-            evaluation_config={
-                "explore": True,
-            }
-        )
+        # .evaluation(
+        #     evaluation_interval=100,
+        #     evaluation_duration=3,
+        #     evaluation_config={
+        #         "explore": True,
+        #     }
+        # )
+        .build()
     )
 
-    tuner = tune.Tuner(
-        "PPO",
-        run_config=tune.RunConfig(
-            name="warehouse_marl_train",
-            stop={"training_iteration": 100},
-            checkpoint_config=tune.CheckpointConfig(
-                checkpoint_frequency=1,
-                checkpoint_at_end=True,
-            )
-        ),
-        param_space=config.to_dict()
-    )
+    for i in range(100):
+        result = algo_ppo.train()
+        print(pretty_print(result))
+        if i % 5 == 0:
+            checkpoint_dir = algo_ppo.save()
+            print(f"checkpoint saved in directory {checkpoint_dir}")
 
-    tuner.fit()
+
+    # tuner = tune.Tuner(
+    #     "PPO",
+    #     run_config=tune.RunConfig(
+    #         name="warehouse_marl_train",
+    #         stop={"training_iteration": 100},
+    #         checkpoint_config=tune.CheckpointConfig(
+    #             checkpoint_frequency=1,
+    #             checkpoint_at_end=True,
+    #         )
+    #     ),
+    #     param_space=config.to_dict()
+    # )
+
+    # tuner.fit()

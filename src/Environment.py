@@ -129,14 +129,13 @@ class WarehouseEnv(MultiAgentEnv):
         self.possible_agents:List[str] = [c.id for c in self.couriers]
         self.agents:List[str] = [c.id for c in self.couriers]
         self.agent_count = len(self.possible_agents)
-        
+
         # Observations:
         # all agent positions (x,y,theta)
+        #    (sorted by distance to each agent):
         # all agent navigation goals (x, y, theta)
-        # all agent TASK goals (x,y,theta) 
+        # all agent TASK goals (x,y,theta)
         obs_len = self.agent_count * 3 * 3
-        # Old
-        #self.single_observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(obs_len,), dtype=np.float64)
         obs_len = 9 * self.agent_count
         self.single_observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf,
@@ -149,14 +148,9 @@ class WarehouseEnv(MultiAgentEnv):
             for c in self.couriers
         }
         
-        # Action - [mode, (x,y,theta)]
-        map_min, map_max = self.map.map_min_world, self.map.man_max_world
-        self.single_action_space = gym.spaces.Tuple((
-            gym.spaces.Discrete(2),  # mode: 0 = follow_path, 1 = plan path to (x, y, theta)
-            gym.spaces.Box(low=np.array([*map_min, -np.pi]),
-                high=np.array([*map_max, np.pi]),
-                dtype=np.float32)
-            ))
+        # Action space
+        self.single_action_space = gym.spaces.Discrete(2) # 0 - idle, 1 - follow path
+
         self.action_spaces = {
             c.id: deepcopy(self.single_action_space)
             for c in self.couriers
@@ -358,15 +352,31 @@ class WarehouseEnv(MultiAgentEnv):
         
         
         for courier in self.couriers:
+
+            # set new goal if active task active goal differs
+            if courier.active_task and not courier.goal:
+                # update goal to active 
+                courier.goal = courier.active_task.active_goal
+                if courier.logging:
+                    print(f"Robot {c_id} set new goal to task target: {courier.goal}")
+
             c_id = courier.id
             action = action_dict[c_id]
-            mode = int(action[0])  # 0 = follow_path, 1 = set new goal
-            target_pose = Position(*action[1])
-            
-            if mode == 1:
-                courier.goal = target_pose
-            
-            courier.follow_path(dt=self.dt)
+
+            if courier.logging:
+                print(f"Courier {c_id} action: {action}")
+
+            if action == 0:
+                # stay idle
+                if courier.logging:
+                    print(f"Robot {c_id} is idle.")
+            elif action == 1:
+                # follow path
+                courier.follow_path(dt=self.dt)
+                if courier.logging:
+                    print(f"Robot {c_id} is following path.")
+            else:
+                raise ValueError(f"Invalid action {action} for agent {c_id}.")
             
              # Collect agent data
             obs[c_id] = self._get_obs(c_id)
@@ -376,7 +386,11 @@ class WarehouseEnv(MultiAgentEnv):
 
         # RLlib requires "__all__" key in done dict
         terminateds["__all__"] = all(terminateds[agent.id] for agent in self.couriers)
+        #terminateds["__all__"] = all(terminateds.get(agent.id, True) for agent in self.couriers)
         truncateds = deepcopy(terminateds)
+
+        if self.visualizer:
+            self.render()
         
         return obs, rewards, terminateds, truncateds, infos
 
@@ -387,7 +401,7 @@ class WarehouseEnv(MultiAgentEnv):
         if self.visualizer:
             self.visualizer.render()
     
-    def get_reward(self, courier:Courier, collisions:List[Tuple[int, int]], actions=None):
+    def get_reward(self, courier:Courier, collisions:List[Tuple[int, int]], action:int) -> float:
         """
         Calculate reward for courier.
         """
@@ -401,19 +415,21 @@ class WarehouseEnv(MultiAgentEnv):
         else:
             penalty += 50 # no goal
         
-        
-        action_mode = int(actions[courier.id][0])
+        # penalize going away from loading and unloading position
         if courier.active_task:
             if courier.active_task.status in (Task.AT_PICKUP, Task.AT_DROPOFF) \
-                and action_mode == 1:
-                    # penalize going away from loading and unloading position
+                and action != 0:
                     penalty += 500
         
         # penalzie collisions
         for col_ids in collisions:
             if courier.id in col_ids:
-                penalty += 100
+                penalty += 1000
                 break
+        
+        # reward following_path
+        if action == 1:
+            penalty -= 10
                 
         # negative!
         return -penalty 
@@ -457,6 +473,7 @@ class Visualize:
         Initializes the Pygame screen and returns it.
         """
         pygame.init()
+        pygame.display.init()
         self.env_map = map
         self.couriers = couriers
         self.loaders = loaders
@@ -532,22 +549,23 @@ class Visualize:
                 # draw the path on the screen
                 pygame.draw.lines(self.screen, self.GREEN, False, path_map, 2)
 
-        # DEBUG
-        for event in pygame.event.get():
+        # # DEBUG
+        # for event in pygame.event.get():
             
-            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:  # Left click
-                pixel_pos = pygame.mouse.get_pos()
-                world_pos = self.env_map.map_to_world(*pixel_pos)
+        #     if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:  # Left click
+        #         pixel_pos = pygame.mouse.get_pos()
+        #         world_pos = self.env_map.map_to_world(*pixel_pos)
 
-                pos = Position(*world_pos, theta=0.0)
-                # DEBUG
-                # send robot 1 to pos
-                self.couriers[0].goal = pos
+        #         pos = Position(*world_pos, theta=0.0)
+        #         # DEBUG
+        #         # send robot 1 to pos
+        #         self.couriers[0].goal = pos
 
-                print(f"Clicked pixel: {pixel_pos}")
-                print(f"Clicked world: {world_pos}")
-                print(f"Pixel value at clicked: {self.env_map()[pixel_pos[1], pixel_pos[0]]}")
-                break
+        #         print(f"Clicked pixel: {pixel_pos}")
+        #         print(f"Clicked world: {world_pos}")
+        #         print(f"Pixel value at clicked: {self.env_map()[pixel_pos[1], pixel_pos[0]]}")
+        #         break
         
         # update display loop
+        pygame.event.pump()
         pygame.display.update()
