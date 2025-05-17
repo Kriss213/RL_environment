@@ -31,28 +31,16 @@ if __name__ == "__main__":
     
     map_min, map_max = env.map.map_min_world, env.map.man_max_world
     
-    agents = env.courier_ids
-    actions = {}
-    for agent in agents:
-        mode = np.random.choice([0, 1], p=[0.8, 0.2])
-        x = np.random.uniform(map_min[0], map_max[0])
-        y = np.random.uniform(map_min[1], map_max[1])
-        theta = np.random.uniform(-np.pi, np.pi)
-        actions[agent] = (mode, x, y, theta)
+    agents = env.agents
+    action_space = env.single_action_space
     
-    
-   # env.couriers[0].goal = Position(4.23, -5.38, 0.0)
     while True:
         try:
             actions = {}
             for agent in agents:
-                mode = np.random.choice([0, 1], p=[0.99, 0.01])
-                x = np.random.uniform(map_min[0], map_max[0])
-                y = np.random.uniform(map_min[1], map_max[1])
-                theta = np.random.uniform(-np.pi, np.pi)
-                actions[agent] = (mode, x, y, theta)
+                action = action_space.sample()#
+                actions[agent] = action
             obs, rewards, dones, infos, _ = env.step(action_dict=actions)
-            #print(rewards)
-            env.render()
+
         except KeyboardInterrupt:
             break

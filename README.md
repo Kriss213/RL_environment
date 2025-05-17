@@ -1,6 +1,6 @@
 Run test/enviornment_test.py to test the environment
 
-Run test/train_test.py to test training. (This results in error)
+Run test/train_test.py to test training.
 
 
 Observation for single agent:
@@ -9,7 +9,12 @@ Observation for single agent:
 - Own task goal
 - Other agents' positions, nav goals, and task goals (sorted by distance to self)
 
-Action for single step:
-[mode, (x,y,theta)]
-mode = 0 -> follow path
-mode = 1 -> plan path to (x,y,theta)
+Discrete action for single step:
+0 - stay idle
+1 - follow path
+
+### Note:
+
+```minimal_planner.launch.py``` must be started before training for path planning!
+
+https://github.com/Kriss213/vikings_bot
