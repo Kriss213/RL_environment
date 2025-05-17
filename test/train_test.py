@@ -1,7 +1,6 @@
 import ray
 from ray import tune
 from ray.rllib.algorithms.ppo import PPOConfig
-from gymnasium.wrappers import HumanRendering
 from ray.tune.registry import register_env
 
 import configparser
@@ -31,15 +30,6 @@ if __name__ == "__main__":
    
     register_env("warehouse_env", lambda env_config: WarehouseEnv(env_config))
 
-    # sample = obs_space.sample()
-    # print(sample)
-    # print(obs_space.contains(sample))
-    # print(sample.shape)
-    # sample2 = env._get_obs()
-    # print(obs_space.contains(sample2))
-    # env.close()
-    # exit()
-
     config = (
         PPOConfig()
         .environment(env="warehouse_env",env_config=env_config)
@@ -48,11 +38,7 @@ if __name__ == "__main__":
         .resources(num_cpus_for_main_process=0)
         .learners(num_gpus_per_learner=1)
         .rl_module(model_config={
-            'train_batch_size': 4000,
-            'minibatch_size': 128,
             'lr': 5e-4,
-            'gamma': 0.99,
-            'vf_clip_param': 10.0,
         })
         .multi_agent(
             policies={
@@ -72,10 +58,10 @@ if __name__ == "__main__":
     tuner = tune.Tuner(
         "PPO",
         run_config=tune.RunConfig(
-            name="warehouse_marl_train",
-            stop={"training_iteration": 100},
+            name="warehouse_marl_train_300",
+            stop={"training_iteration": 300},
             checkpoint_config=tune.CheckpointConfig(
-                checkpoint_frequency=1,
+                checkpoint_frequency=5,
                 checkpoint_at_end=True,
             )
         ),
