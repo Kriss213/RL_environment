@@ -9,13 +9,13 @@ from typing import List, Dict, Tuple
 
 from shapely.geometry import Polygon
 from PIL import Image
-from pathlib import Path
 from copy import deepcopy
 
 #from src.environment_entities import Robot, Loader, Unloader, CBBA
 from src.Agents import Courier, Loader, Unloader
 from src.Map import Map
 from src.Classes import Position, CBBA, Task
+import rclpy
 
 import pygame
 import numpy as np
@@ -86,6 +86,8 @@ class WarehouseEnv(MultiAgentEnv):
         """
         Initialize MARL environment.
         """        
+        if not rclpy.ok():
+            rclpy.init()
 
         # ============ Parse config.ini ============
         #self.__config = configparser.ConfigParser()
@@ -244,6 +246,9 @@ class WarehouseEnv(MultiAgentEnv):
                     logging=courier_logging)
                     for i in range(1, len(init_robot_poses) + 1)
             ]
+        for c1 in self.couriers:
+            # set other courier positions
+            c1.other_couriers = [c2 for c2 in self.couriers if c1.id != c2.id]
         # ============ ================ ============
 
     def _get_obs(self, agent_id):
@@ -327,9 +332,8 @@ class WarehouseEnv(MultiAgentEnv):
         for courier in self.couriers:
             observations[courier.id] = self._get_obs(courier.id)
             infos[courier.id] = {}
-        
-        # obs = self._get_obs()
-        # print(obs, obs.shape )
+
+
         return observations, infos
         
     def step(self, action_dict):
@@ -338,9 +342,11 @@ class WarehouseEnv(MultiAgentEnv):
         
         :param action_dict: Dictionary of agent actions like:
         
-        courier.id : (mode, x, y, theta) 
+        courier.id : 0 or 1
+        0 - wait
+        1 - follow path 
         """
-        #print(f"Recieved action_dict: {action_dict}")
+
         # Empty return dicts
         obs, rewards, terminateds, infos = {}, {}, {}, {}
         
@@ -352,13 +358,19 @@ class WarehouseEnv(MultiAgentEnv):
         
         
         for courier in self.couriers:
-
+            # set courier obstacles (other couriers)
+            # other_courier_pos = [c.position for c in self.couriers if c.id != courier.id]
+            # courier.update_obstacles(other_courier_pos)
             # set new goal if active task active goal differs
-            if courier.active_task and not courier.goal:
+            if courier.active_task and not courier.goal \
+                and not (courier.active_task.status in (Task.AT_PICKUP, Task.AT_DROPOFF)):
                 # update goal to active 
                 courier.goal = courier.active_task.active_goal
                 if courier.logging:
                     print(f"Robot {c_id} set new goal to task target: {courier.goal}")
+
+            #publish courier pos
+            courier.publish_position()
 
             c_id = courier.id
             action = action_dict[c_id]
@@ -369,8 +381,17 @@ class WarehouseEnv(MultiAgentEnv):
             if action == 0:
                 # stay idle
                 if courier.logging:
-                    print(f"Robot {c_id} is idle.")
+                    print(f"Robot {c_id} is waiting.")
             elif action == 1:
+                # validate path
+                if courier.goal:
+                    if not courier.validate_path(n=20):
+                        if courier.logging:
+                            print(f"Robot {c_id} path invalid. Replanning...")
+                        # trigger path replan
+                        courier.goal = courier.active_task.active_goal
+                    
+                
                 # follow path
                 courier.follow_path(dt=self.dt)
                 if courier.logging:
@@ -385,8 +406,7 @@ class WarehouseEnv(MultiAgentEnv):
             infos[c_id] = {}
 
         # RLlib requires "__all__" key in done dict
-        terminateds["__all__"] = all(terminateds[agent.id] for agent in self.couriers)
-        #terminateds["__all__"] = all(terminateds.get(agent.id, True) for agent in self.couriers)
+        terminateds["__all__"] = all(terminateds[agent.id] for agent in self.couriers) or len(collisions) > 0
         truncateds = deepcopy(terminateds)
 
         if self.visualizer:
@@ -405,36 +425,33 @@ class WarehouseEnv(MultiAgentEnv):
         """
         Calculate reward for courier.
         """
-        # TODO - adjust reward function
-        penalty = 0 
+        reward = 0 
         
-        # penalize being far from goal
-        if courier.active_task:
-            dist_to_task_goal = np.hypot(*(courier.active_task.active_goal - courier.position)()[:2])
-            penalty += dist_to_task_goal
-        else:
-            penalty += 50 # no goal
+        if action == 0: # waiting
+            if self._prevented_collision(courier):
+                reward += 10
+            else:
+                reward -= 1
+
+        elif action == 1: # following path
+            if self._blocking_path(courier, action):
+                reward -= 10
+            else:
+                reward += 1
+
+            # no path to follow
+            if not courier.path:
+                reward -= 5
+
+            # penalize causing collision
+            for col_ids in collisions:
+                if courier.id in col_ids:
+                    reward -= 50
+                    break
         
-        # penalize going away from loading and unloading position
-        if courier.active_task:
-            if courier.active_task.status in (Task.AT_PICKUP, Task.AT_DROPOFF) \
-                and action != 0:
-                    penalty += 500
+        return reward
         
-        # penalzie collisions
-        for col_ids in collisions:
-            if courier.id in col_ids:
-                penalty += 1000
-                break
-        
-        # reward following_path
-        if action == 1:
-            penalty -= 10
-                
-        # negative!
-        return -penalty 
-        
-    def _check_robot_collisions(self) -> List[Tuple[int, int]]:
+    def _check_robot_collisions(self) -> List[Tuple[str, str]]:
         """
         Checks collisions between robots.
 
@@ -452,7 +469,68 @@ class WarehouseEnv(MultiAgentEnv):
                     collisions.append((rob_id_1, rob_id_2))
         return collisions
     
+    def _prevented_collision(self, courier:Courier) -> bool:
+        """
+        Check if robot prevented collision by waiting
+        """
+        if not courier.path:
+            return False
+
+        # Change robot position to next, check collisions and change position back
+        old_x, old_y, old_theta = courier.position.x, courier.position.y, courier.position.theta
+        # move robot to next position
         
+        next_post = courier.path[0]
+        courier.position.x = next_post[0]
+        courier.position.y = next_post[1]
+        courier.position.theta = next_post[2]
+
+        collisions = self._check_robot_collisions()
+        # change robot position back
+        courier.position.x = old_x
+        courier.position.y = old_y
+        courier.position.theta = old_theta
+        
+        # check if courier id is in collisions
+        for col in collisions:
+            if courier.id in col:
+                return True
+        return False
+
+    def _blocking_path(self, courier:Courier, action:int) -> bool:
+        """
+        Check if robot is blocking someone's path by moving
+        """
+
+        if action != 1 or not courier.path:
+            return False
+
+        # Change robot position to next, check collisions and change position back
+        old_x, old_y, old_theta = courier.position.x, courier.position.y, courier.position.theta
+        # move robot to next position
+        
+        next_post = courier.path[0]
+        courier.position.x = next_post[0]
+        courier.position.y = next_post[1]
+        courier.position.theta = next_post[2]
+
+        for c in self.couriers:
+            if c.id == courier.id:
+                continue
+            # check if other robot's path is valid
+            if not c.validate_path(n=20):
+                courier.position.x = old_x
+                courier.position.y = old_y
+                courier.position.theta = old_theta
+                return True
+        
+        # change robot position back
+        courier.position.x = old_x
+        courier.position.y = old_y
+        courier.position.theta = old_theta
+        
+        return False
+
         
     
 class Visualize:

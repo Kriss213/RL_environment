@@ -9,8 +9,65 @@ from typing import List, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.Agents import Courier, Unloader, Loader
 
+from std_msgs.msg import Header
+from sensor_msgs.msg import PointCloud2, PointField
+import numpy as np
+import struct
 
+from rclpy.node import Node
+from nav2_simple_commander.robot_navigator import BasicNavigator
+from geometry_msgs.msg import PoseStamped
 
+from scipy.spatial.transform import Rotation as R
+
+class Navigator:
+    def __init__(self, node_name:str, ns:str):
+        self.navigator = BasicNavigator(node_name=node_name, namespace=ns)
+        self.node = self.navigator  # BasicNavigator is a Node subclass
+
+    def compute_path(self, start, goal):
+        return self.navigator.getPath(start=start, goal=goal, use_start=True)
+
+    def create_pose(self, x, y, yaw=0.0, frame='map'):
+        pose = PoseStamped()
+        pose.header.frame_id = frame
+        pose.header.stamp = self.node.get_clock().now().to_msg()
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        q = R.from_euler('z', yaw).as_quat()
+        pose.pose.orientation.x = q[0]
+        pose.pose.orientation.y = q[1]
+        pose.pose.orientation.z = q[2]
+        pose.pose.orientation.w = q[3]
+        return pose
+
+class PointCloudPublisher:
+    def __init__(self, node: Node, topic="/obstacle_points", qos=10):
+        self.node = node
+        self.publisher = self.node.create_publisher(PointCloud2, topic, qos)
+
+    def publish_points(self, points, frame_id="map"):
+        header = Header()
+        header.stamp = self.node.get_clock().now().to_msg()
+        header.frame_id = frame_id
+
+        cloud_msg = PointCloud2()
+        cloud_msg.header = header
+        cloud_msg.height = 1
+        cloud_msg.width = len(points)
+        cloud_msg.fields = [
+            PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+        ]
+        cloud_msg.is_bigendian = False
+        cloud_msg.point_step = 12
+        cloud_msg.row_step = cloud_msg.point_step * cloud_msg.width
+        cloud_msg.is_dense = True
+        cloud_msg.data = b''.join([struct.pack('fff', *pt) for pt in points])
+
+        self.publisher.publish(cloud_msg)
+ 
 class Position:
     def __init__(self, x: float, y: float, theta: float):
         self.x = x # meters
