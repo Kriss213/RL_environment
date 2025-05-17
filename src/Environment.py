@@ -401,7 +401,7 @@ class WarehouseEnv(MultiAgentEnv):
             
              # Collect agent data
             obs[c_id] = self._get_obs(c_id)
-            rewards[c_id] = self.get_reward(courier, collisions, action_dict)
+            rewards[c_id] = self.get_reward(courier, collisions, action)
             terminateds[c_id] = self.TA.delivered_tasks >= self.episode_length
             infos[c_id] = {}
 
@@ -434,7 +434,7 @@ class WarehouseEnv(MultiAgentEnv):
                 reward -= 1
 
         elif action == 1: # following path
-            if self._blocking_path(courier, action):
+            if self._blocking_path(courier):
                 reward -= 10
             else:
                 reward += 1
@@ -448,6 +448,8 @@ class WarehouseEnv(MultiAgentEnv):
                 if courier.id in col_ids:
                     reward -= 50
                     break
+        else:
+            raise ValueError(f"Invalid action {action} for agent {courier.id}.")
         
         return reward
         
@@ -497,12 +499,12 @@ class WarehouseEnv(MultiAgentEnv):
                 return True
         return False
 
-    def _blocking_path(self, courier:Courier, action:int) -> bool:
+    def _blocking_path(self, courier:Courier) -> bool:
         """
         Check if robot is blocking someone's path by moving
         """
 
-        if action != 1 or not courier.path:
+        if not courier.path:
             return False
 
         # Change robot position to next, check collisions and change position back
