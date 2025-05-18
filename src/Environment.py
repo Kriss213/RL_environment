@@ -14,7 +14,7 @@ from copy import deepcopy
 #from src.environment_entities import Robot, Loader, Unloader, CBBA
 from src.Agents import Courier, Loader, Unloader
 from src.Map import Map
-from src.Classes import Position, CBBA, Task
+from src.Classes import Position, TaskAllocator, Task
 import rclpy
 
 import pygame
@@ -162,7 +162,7 @@ class WarehouseEnv(MultiAgentEnv):
         # ============ ================ ============
         
         # ============ Initialize task allocator ============
-        self.TA:CBBA = CBBA(
+        self.TA:TaskAllocator = TaskAllocator(
             couriers=self.couriers,
             unloaders=self.unloaders,
             loaders=self.loaders,
@@ -356,21 +356,28 @@ class WarehouseEnv(MultiAgentEnv):
         # get robot collisions
         collisions = self._check_robot_collisions()
         
+        agent_deadlocks = {}
         
         for courier in self.couriers:
-            # set courier obstacles (other couriers)
-            # other_courier_pos = [c.position for c in self.couriers if c.id != courier.id]
-            # courier.update_obstacles(other_courier_pos)
-            # set new goal if active task active goal differs
-            if courier.active_task and not courier.goal \
-                and not (courier.active_task.status in (Task.AT_PICKUP, Task.AT_DROPOFF)):
-                # update goal to active 
-                courier.goal = courier.active_task.active_goal
-                if courier.logging:
-                    print(f"Robot {c_id} set new goal to task target: {courier.goal}")
+            
 
-            #publish courier pos
-            courier.publish_position()
+            if self._check_deadlocks(courier, n=10):
+                agent_deadlocks[courier.id] = True
+
+            #publish courier pos if not near loader/unloader
+            pub = True
+            for loader in self.loaders:
+                dist_to_loader = np.linalg.norm(np.array(courier.position()[:2]) - np.array(loader.position()[:2]))
+                if dist_to_loader < 1.0:
+                    pub = False
+                    break
+            for unloader in self.unloaders:
+                dist_to_unloader = np.linalg.norm(np.array(courier.position()[:2]) - np.array(unloader.position()[:2]))
+                if dist_to_unloader < 1.0:
+                    pub = False
+                    break
+            if pub:
+                courier.publish_position()
 
             c_id = courier.id
             action = action_dict[c_id]
@@ -383,6 +390,16 @@ class WarehouseEnv(MultiAgentEnv):
                 if courier.logging:
                     print(f"Robot {c_id} is waiting.")
             elif action == 1:
+                # make sure robot has goal and at least attempts to plan path
+                # set new goal if active task active goal differs
+                if courier.active_task and not courier.goal \
+                    and not (courier.active_task.status in (Task.AT_PICKUP, Task.AT_DROPOFF)):
+                    # update goal to active 
+                    courier.goal = courier.active_task.active_goal
+                    if courier.logging:
+                        print(f"Robot {c_id} set new goal to task target: {courier.goal}")
+
+
                 # validate path
                 if courier.goal:
                     if not courier.validate_path(n=20):
@@ -390,6 +407,8 @@ class WarehouseEnv(MultiAgentEnv):
                             print(f"Robot {c_id} path invalid. Replanning...")
                         # trigger path replan
                         courier.goal = courier.active_task.active_goal
+                        # replan local path
+                        # courier._replan_local_path(n=50)
                     
                 
                 # follow path
@@ -405,8 +424,23 @@ class WarehouseEnv(MultiAgentEnv):
             terminateds[c_id] = self.TA.delivered_tasks >= self.episode_length
             infos[c_id] = {}
 
+        # adjust agent rewards based on deadlocks
+        for c_id, deadlock in agent_deadlocks.items():
+            if deadlock:
+                if action == 1: # following path
+                    # if only agent in deadlock, penalize
+                    if sum(agent_deadlocks.values()) == 1:
+                        rewards[c_id] -= 20 # agent should be waiting instead
+
+                if action == 0: # waiting
+                    # if at least 2 agents are in deadlock, penalize waiting
+                    if sum(agent_deadlocks.values()) >= 2: 
+                        rewards[c_id] -= 20 # agent should prevent such situations.
+
+
         # RLlib requires "__all__" key in done dict
-        terminateds["__all__"] = all(terminateds[agent.id] for agent in self.couriers) or len(collisions) > 0
+        terminateds["__all__"] = all(terminateds[agent.id] for agent in self.couriers) \
+              or len(collisions) > 0 or sum(agent_deadlocks.values()) >= 2 # end episode if at least 2 agents are in a deadlock
         truncateds = deepcopy(terminateds)
 
         if self.visualizer:
@@ -428,13 +462,13 @@ class WarehouseEnv(MultiAgentEnv):
         reward = 0 
         
         if action == 0: # waiting
-            if self._prevented_collision(courier):
+            if self._likely_prevented_collision(courier):
                 reward += 10
             else:
                 reward -= 1
 
         elif action == 1: # following path
-            if self._blocking_path(courier):
+            if self._likely_blocking_path(courier):
                 reward -= 10
             else:
                 reward += 1
@@ -452,7 +486,19 @@ class WarehouseEnv(MultiAgentEnv):
             raise ValueError(f"Invalid action {action} for agent {courier.id}.")
         
         return reward
+
+    def _check_deadlocks(self, courier:Courier, n=5) -> bool:
+        """
+        Check if courier is in deadlock (cannot plan path for extended period of time)
+        for whatever reason (usually facing different robot in corridor etc.).
+
+        Args:
+            courier (Courier): The courier to check.
+            n (int): Number of failed path plan attempts to check (Default 5).
+        """
+        return courier.failed_path_plan_attempts > n
         
+
     def _check_robot_collisions(self) -> List[Tuple[str, str]]:
         """
         Checks collisions between robots.
@@ -471,66 +517,55 @@ class WarehouseEnv(MultiAgentEnv):
                     collisions.append((rob_id_1, rob_id_2))
         return collisions
     
-    def _prevented_collision(self, courier:Courier) -> bool:
+    def _likely_prevented_collision(self, courier:Courier) -> bool:
         """
-        Check if robot prevented collision by waiting
+        Check if robot (likely) prevented collision by waiting
         """
         if not courier.path:
             return False
+        # assumes action is 0 (waiting)
+        n_points = min(50, len(courier.path))
 
-        # Change robot position to next, check collisions and change position back
-        old_x, old_y, old_theta = courier.position.x, courier.position.y, courier.position.theta
-        # move robot to next position
-        
-        next_post = courier.path[0]
-        courier.position.x = next_post[0]
-        courier.position.y = next_post[1]
-        courier.position.theta = next_post[2]
-
-        collisions = self._check_robot_collisions()
-        # change robot position back
-        courier.position.x = old_x
-        courier.position.y = old_y
-        courier.position.theta = old_theta
-        
-        # check if courier id is in collisions
-        for col in collisions:
-            if courier.id in col:
-                return True
-        return False
-
-    def _blocking_path(self, courier:Courier) -> bool:
-        """
-        Check if robot is blocking someone's path by moving
-        """
-
-        if not courier.path:
-            return False
-
-        # Change robot position to next, check collisions and change position back
-        old_x, old_y, old_theta = courier.position.x, courier.position.y, courier.position.theta
-        # move robot to next position
-        
-        next_post = courier.path[0]
-        courier.position.x = next_post[0]
-        courier.position.y = next_post[1]
-        courier.position.theta = next_post[2]
-
+        # get the next n points in the path
+        path_points = courier.path[:n_points]
         for c in self.couriers:
             if c.id == courier.id:
                 continue
-            # check if other robot's path is valid
-            if not c.validate_path(n=20):
-                courier.position.x = old_x
-                courier.position.y = old_y
-                courier.position.theta = old_theta
-                return True
-        
-        # change robot position back
-        courier.position.x = old_x
-        courier.position.y = old_y
-        courier.position.theta = old_theta
-        
+            # get distance to other courier from courier
+            dist = np.linalg.norm(np.array(c.position()[:2]) - np.array(courier.position()[:2]))
+            if dist > 3.0:
+                continue
+            # check if other courier is NEAR path
+            for point in path_points:
+                dist = np.linalg.norm(np.array(point[:2]) - np.array(c.position()[:2]))
+                if dist < 0.5:
+                    return True
+        return False
+
+
+    def _likely_blocking_path(self, courier:Courier) -> bool:
+        """
+        Check if robot (likely) is blocking someone's path by moving
+        """
+
+        if not courier.path:
+            return False
+
+        # assumes action is 1 (following path)
+        for c in self.couriers:
+            if c.id == courier.id:
+                continue
+            # get distance to other courier from courier
+            dist = np.linalg.norm(np.array(c.position()[:2]) - np.array(courier.position()[:2]))
+            if dist > 3.0 or not c.path:
+                continue
+            # check if courier is NEAR other courier's path points
+            n_points = min(50, len(courier.path))
+            path_points = c.path[:n_points]
+            for point in path_points:
+                dist = np.linalg.norm(np.array(point[:2]) - np.array(c.position()[:2]))
+                if dist < 0.5:
+                    return True
         return False
 
         
