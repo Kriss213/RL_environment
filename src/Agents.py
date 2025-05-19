@@ -37,6 +37,9 @@ class Courier(Robot):
         self.PC_publisher = PointCloudPublisher(self.navigator.node,
                                                 topic=f"/{robot_id}/position")
         
+        # validations
+        self.failed_validations_in_row = 0
+
     def reset(self):
         """Resets Courier agent."""
         self._goal = None
@@ -91,10 +94,12 @@ class Courier(Robot):
         # Path is only invalid if other robot's bounding box
         # intersects path >=3 m away from the goal
         if not self.path:
+            self.failed_validations_in_row = 0
             return True
         
         own_dist_to_goal = np.linalg.norm(self.position()[:2] - self.path[-1][:2])
         if own_dist_to_goal < 3.0:
+            self.failed_validations_in_row = 0
             return True
         
         n = len(self.path) if n is None else min(n, len(self.path))
@@ -116,8 +121,10 @@ class Courier(Robot):
                     # if they are close to their goal, do not validate path
                     if dist_to_their_goal < 3.0:
                         continue
+                self.failed_validations_in_row += 1
                 return False
-        
+            
+        self.failed_validations_in_row = 0
         return True
 
 class Loader:

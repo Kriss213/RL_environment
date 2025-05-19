@@ -357,12 +357,14 @@ class WarehouseEnv(MultiAgentEnv):
         collisions = self._check_robot_collisions()
         
         agent_deadlocks = {}
-        
+        validations_failed = {}
+
         for courier in self.couriers:
             
 
             if self._check_deadlocks(courier, n=10):
                 agent_deadlocks[courier.id] = True
+            validations_failed[courier.id] = courier.failed_validations_in_row
 
             #publish courier pos if not near loader/unloader
             pub = True
@@ -409,7 +411,7 @@ class WarehouseEnv(MultiAgentEnv):
                         courier.goal = courier.active_task.active_goal
                         # replan local path
                         # courier._replan_local_path(n=50)
-                    
+                       
                 
                 # follow path
                 courier.follow_path(dt=self.dt)
@@ -438,9 +440,20 @@ class WarehouseEnv(MultiAgentEnv):
                         rewards[c_id] -= 20 # agent should prevent such situations.
 
 
+        # if atleast 2 agents have too much failed validations in row, episode should end
+        failed_c = 0
+        for c_id, failed in validations_failed.items():
+            if failed >= 5:
+                failed_c += 1
+
+        if failed_c >= 2:
+            for c in self.couriers:
+                c.failed_validations_in_row = 0
+            
         # RLlib requires "__all__" key in done dict
         terminateds["__all__"] = all(terminateds[agent.id] for agent in self.couriers) \
-              or len(collisions) > 0 or sum(agent_deadlocks.values()) >= 2 # end episode if at least 2 agents are in a deadlock
+              or len(collisions) > 0 or sum(agent_deadlocks.values()) >= 2 or failed_c >= 2
+        # end episode if at least 2 agents are in a deadlock
         truncateds = deepcopy(terminateds)
 
         if self.visualizer:
@@ -471,7 +484,7 @@ class WarehouseEnv(MultiAgentEnv):
             if self._likely_blocking_path(courier):
                 reward -= 10
             else:
-                reward += 1
+                reward += 10
 
             # no path to follow
             if not courier.path:
