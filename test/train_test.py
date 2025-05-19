@@ -13,6 +13,29 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.Environment import WarehouseEnv
 from ray.rllib.env import EnvContext
 
+# https://github.com/ray-project/ray/issues/51560#issuecomment-2831921054
+# Fix for optimizer betas as tensors after checkpoint restore
+from ray.rllib.callbacks.callbacks import RLlibCallback
+from ray.rllib.algorithms.algorithm import Algorithm
+from torch import Tensor
+from typing import Optional
+from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
+
+class AlgorithmFix(RLlibCallback):
+    def __init__(self, **kwargs):
+        super().__init__()
+
+    def on_algorithm_init(self,* , algorithm: "Algorithm", metrics_logger: Optional[MetricsLogger] = None, **kwargs,) -> None:
+        pass
+        
+    def on_checkpoint_loaded(self, *, algorithm: Algorithm, **kwargs, ) -> None:
+        def betas_tensor_to_float(learner):
+            print("Shit is called 2")
+            param_grp = next(iter(learner._optimizer_parameters.keys())).param_groups[0]
+            if not param_grp['capturable'] and isinstance(param_grp["betas"][0], Tensor):
+                param_grp["betas"] = tuple(beta.item() for beta in param_grp["betas"])
+        algorithm.learner_group.foreach_learner(betas_tensor_to_float)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to a checkpoint to resume from")
@@ -58,27 +81,28 @@ if __name__ == "__main__":
     )
     iterations = 500
     run_config = tune.RunConfig(
-        name=f"warehouse_marl_train_{iterations}",
+        name=f"warehouse_marl_train____{iterations}",
         stop={"training_iteration": iterations},
         checkpoint_config=tune.CheckpointConfig(
             checkpoint_frequency=5,
             checkpoint_at_end=True,
         )
     )
-
-    if args.checkpoint:
+    
+    if args.checkpoint:       
+        config.callbacks(
+            callbacks_class=AlgorithmFix
+        )
         tuner = tune.Tuner.restore(
             path=args.checkpoint,
-            trainable="PPO",
-            resume_unfinished=True,
-            param_space=config.to_dict(),
-            #run_config=run_config,
+            trainable=config.algo_class,
+            param_space=config
         )
     else:
         tuner = tune.Tuner(
-            "PPO",
+            config.algo_class,
             run_config=run_config,
-            param_space=config.to_dict(),
+            param_space=config
         )
 
     tuner.fit()
