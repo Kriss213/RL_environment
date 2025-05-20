@@ -143,7 +143,7 @@ class Task:
         """
         self.elapsed_time += dt
         
-class CBBA:
+class TaskAllocator:
     """
     A centralized task allocator.
     Manages all loaders, couriers and unloaders.
@@ -296,5 +296,5 @@ class CBBA:
     def reset(self):
         self.delivered_tasks = 0
         self.runtime = 0.0
-        np.random.seed(self.seed) 
+        #np.random.seed(self.seed) 
         

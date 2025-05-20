@@ -12,8 +12,6 @@ from src.Map import Map
 
 from nav_msgs.msg import Path
 
-np.random.seed(42)
-
 class Robot:
     MAX_LIN_VEL = 0.26 # m/s
     MAX_ANG_VEL = 0.35 # rad/s
@@ -56,6 +54,9 @@ class Robot:
 
         self.navigator = Navigator(f"navigator_{self.id}", ns=self.id)
 
+        # failed path plan attempts
+        self.failed_path_plan_attempts = 0
+
     @property
     def goal(self) -> Position:
         """Returns the robot's goal."""
@@ -68,16 +69,12 @@ class Robot:
             self._goal = value # set goal only if valid path found
             self._plan_path()                
             if self.path:
+                self.failed_path_plan_attempts = 0
                 if self.logging:
                     print(f"Path planned for robot {self.id}. Length: {len(self.path)} points")
-                # simplify path will need to be tested since
-                # ROS2 plans path with a lot of points
 
-                # self.path = self.__simplify_path()
-                # print(f"Simplified path for robot {self.id}. Length: {len(self.path)} points")
-                # self.path = self.__smooth_path(self.path, num_points=len(self.path))
-                # print(f"Smoothed path for robot {self.id}. Length: {len(self.path)} points")
             else:
+                self.failed_path_plan_attempts += 1
                 self._goal = None
         else:
             raise ValueError("Goal must be an instance of Position class.")
@@ -120,16 +117,54 @@ class Robot:
         # Update orientation (theta adjusts automatically in Position)
         self.position.theta += ang_vel * dt
 
-    def _plan_path(self):
+    def _replan_local_path(self, n:int=50):
+        """
+        Simulate local path replanning by replacing next n points with new path.
+        """
+        n = min(n, len(self.path))
+
+        new_goal = self.path[n]
+
+        start_pose = self.navigator.create_pose(self.position.x, self.position.y, self.position.theta)
+        goal_pose = self.navigator.create_pose(new_goal[0], new_goal[1], new_goal[2])
+
+        new_local_path:Path = self.navigator.compute_path(start_pose, goal_pose)
+
+        if self.logging:
+            print(f"Replanning LOCAL path for robot {self.id} from {self.position} to {new_goal}")
+
+        if not new_local_path:
+            return False
+        
+        new_local_path_xyyaw = []
+        for pose in new_local_path.poses:
+            x = pose.pose.position.x
+            y = pose.pose.position.y
+            #theta = pose.pose.orientation.z
+            orientation = R.from_quat([pose.pose.orientation.x,
+                                      pose.pose.orientation.y,
+                                      pose.pose.orientation.z,
+                                      pose.pose.orientation.w])
+            theta = orientation.as_euler('xyz')[2]  # yaw
+            new_local_path_xyyaw.append((x, y, theta))
+
+        self.path = new_local_path_xyyaw + self.path[n:]
+
+        return True
+
+    def _plan_path(self, goal:Position=None):
         """
         Plans a path for the robot to the goal using A* and stores it in self.path (world coordinates).
         """
         if self.logging:
             print(f"Planning path for robot {self.id} from {self.position} to {self.goal}")
+        
+        if not goal:
+            goal = self.goal
 
         # Call ROS2 service to get the path
         start_pose = self.navigator.create_pose(self.position.x, self.position.y, self.position.theta)
-        goal_pose = self.navigator.create_pose(self.goal.x, self.goal.y, self.goal.theta)
+        goal_pose = self.navigator.create_pose(goal.x, goal.y, goal.theta)
         path:Path = self.navigator.compute_path(start_pose, goal_pose)
 
         self.path = []
@@ -148,91 +183,10 @@ class Robot:
                                       pose.pose.orientation.z,
                                       pose.pose.orientation.w])
             theta = orientation.as_euler('xyz')[2]  # yaw
-            # TODO add theta
+           
             self.path.append((x, y, theta))
 
-
-        # grid = self.planning_map
-        # height, width = grid.shape
-
-        # start = self.position
-        # goal = self.goal
-
-        # sx, sy = self.map.world_to_map(start.x, start.y)
-        # gx, gy = self.map.world_to_map(goal.x, goal.y)
-
-        # # scale map points
-        # scale_factor = self.map.downsample_factor
-        # sx //= scale_factor
-        # sy //= scale_factor
-        # gx //= scale_factor
-        # gy //= scale_factor
-
-
-        # if not (0 <= sx < width and 0 <= sy < height and 0 <= gx < width and 0 <= gy < height):
-        #     self.path = []
-        #     if self.logging:
-        #         print(f"Path planning failed for robot {self.id}. Start or goal out of bounds.")
-        #     return []
-        # if grid[gy, gx] != self.map.FREE:
-        #     self.path = []
-        #     if self.logging:
-        #         print(f"Path planning failed for robot {self.id}. Goal blocked.")
-        #     return []
-
-        # def h(p1, p2):
-        #     #return np.abs(p1[0] - p2[0]) + np.abs(p1[1] - p2[1])
-        #     return np.hypot(p1[0] - p2[0], p1[1] - p2[1])
-
-        # open_set = []
-        # heapq.heappush(open_set, (h((sx, sy), (gx, gy)), 0, (sx, sy)))
-
-        # came_from = {}
-        # g_score = np.full_like(grid, np.inf, dtype=np.float32)
-        # g_score[sy, sx] = 0
-
-        # visited = np.zeros_like(grid, dtype=bool)
-        # neighbors = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)]  # 8-connected
-
-        # while open_set:
-        #     _, _, current = heapq.heappop(open_set)
-        #     cx, cy = current
-
-        #     if visited[cy, cx]:
-        #         continue
-        #     visited[cy, cx] = True
-
-        #     if current == (gx, gy):
-        #         # Reconstruct path
-        #         path = [current]
-        #         while current in came_from:
-        #             current = came_from[current]
-        #             path.append(current)
-        #         path.reverse()
-
-        #         # scale map back up and return 
-        #         self.path = [self.map.map_to_world(col*scale_factor, row*scale_factor) for col, row in path]
-        #         self.orig_path = path.copy()
-        #         return  # Found, exit early
-
-        #     for dx, dy in neighbors:
-        #         nx, ny = cx + dx, cy + dy
-        #         if not (0 <= nx < width and 0 <= ny < height):
-        #             continue
-        #         if grid[ny, nx] != self.map.FREE:
-        #             continue
-
-        #         tentative_g = g_score[cy, cx] + 1
-        #         if tentative_g < g_score[ny, nx]:
-        #             g_score[ny, nx] = tentative_g
-        #             f = tentative_g + h((nx, ny), (gx, gy))
-        #             heapq.heappush(open_set, (f, tentative_g, (nx, ny)))
-        #             came_from[(nx, ny)] = (cx, cy)
-        # if self.logging:
-        #     print(f"Path planning failed for robot {self.id}. No valid path found.")
-        # self.path = []  # No path found
-
-    def follow_path(self, dt: float, lin_gain: float = 1.0):
+    def follow_path(self) -> bool:
         """
         Follows the path step-by-step using proportional control.
         Respects heading and distance tolerances.
@@ -242,8 +196,12 @@ class Robot:
             self.position.y = self.path[0][1]
             self.position.theta = self.path[0][2]
             self.path.pop(0)
-            return
-    
+            return True
+        else:
+            # goal is reached
+            self.clear_goal()
+            return False
+
     def reached_target(self, target:Position) -> bool:       
         heading_error = (target - self.position).theta
         distance_to_goal = np.hypot(*self.position()[:2]-target()[:2])

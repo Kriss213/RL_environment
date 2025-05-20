@@ -1,10 +1,12 @@
 # on Python 3.10.12
 # on Ubuntu 22.04
 numpy==1.26
-ray[rllib]==2.44.1
+ray[rllib]==2.46.0
 pygame
 gymnasium
 torch
 scipy
 scikit-image
 shapely
+matplotlib
+tensorflow
