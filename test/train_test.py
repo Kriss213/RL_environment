@@ -30,7 +30,6 @@ class AlgorithmFix(RLlibCallback):
         
     def on_checkpoint_loaded(self, *, algorithm: Algorithm, **kwargs, ) -> None:
         def betas_tensor_to_float(learner):
-            print("Shit is called 2")
             param_grp = next(iter(learner._optimizer_parameters.keys())).param_groups[0]
             if not param_grp['capturable'] and isinstance(param_grp["betas"][0], Tensor):
                 param_grp["betas"] = tuple(beta.item() for beta in param_grp["betas"])
