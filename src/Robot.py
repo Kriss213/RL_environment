@@ -186,7 +186,7 @@ class Robot:
            
             self.path.append((x, y, theta))
 
-    def follow_path(self, dt: float, lin_gain: float = 1.0):
+    def follow_path(self) -> bool:
         """
         Follows the path step-by-step using proportional control.
         Respects heading and distance tolerances.
@@ -196,10 +196,11 @@ class Robot:
             self.position.y = self.path[0][1]
             self.position.theta = self.path[0][2]
             self.path.pop(0)
-            return
+            return True
         else:
             # goal is reached
             self.clear_goal()
+            return False
 
     def reached_target(self, target:Position) -> bool:       
         heading_error = (target - self.position).theta

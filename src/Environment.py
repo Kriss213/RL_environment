@@ -132,15 +132,11 @@ class WarehouseEnv(MultiAgentEnv):
         self.agents:List[str] = [c.id for c in self.couriers]
         self.agent_count = len(self.possible_agents)
 
-        # Observations:
-        # all agent positions (x,y,theta)
-        #    (sorted by distance to each agent):
-        # all agent navigation goals (x, y, theta)
-        # all agent TASK goals (x,y,theta)
-        obs_len = self.agent_count * 3 * 3
-        obs_len = 9 * self.agent_count
+        # 9 - own observations
+        # 2x5 - other agent observations
+        obs_len = 9 + 2*5
         self.single_observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf,
+            low=-1.0, high=1.0,
             shape=(obs_len,),
             dtype=np.float32
         )
@@ -149,6 +145,46 @@ class WarehouseEnv(MultiAgentEnv):
             c.id: deepcopy(self.single_observation_space)
             for c in self.couriers
         }
+        
+        self.IDX = dict(
+            dx_to_goal= 0,
+            dy_to_goal= 1,
+            heading_sin= 2,
+            heading_cos= 3,
+            rem_path_len= 4,
+            idle_timer= 5,
+            front_busy= 6,
+            blocking_other= 7,
+            closest_front_dist= 8,
+            # indices 9-18 are the two-neighbour bundle
+        )
+        
+        # Default weights – override in call if needed
+        self.DEFAULT_W = dict(
+            progress            = +10.0,   # reward per delta progress to goal
+            goal_arrival        = +200.0,  # one-time bonus when dx & dy both ~0
+            collision           = -500.0,
+            idle_penalty        = -1.0,    # per step when WAIT without good reason
+            front_busy_penalty  = -5.0,    # waiting while nothing blocks front
+            blocking_penalty    = -8.0,    # is blocking somebody else
+            follow_dist_penalty = -3.0,    # tail-gating, dist < safe
+            plan_fail_penalty   = -3.0,    # FOLLOW_PATH but path length == 0
+        )
+        
+        
+        # OBSERVATION CONSTANTS
+        self.D_MAX = np.hypot(*self.map().shape) * self.map.resolution
+        self.T_IDLE_MAX:float = 30.0 #seconds
+        self.HEADING_ERR_MAX:float = np.deg2rad(35.0)
+        self.HEADING_FOLLOWING_MAX:float = np.deg2rad(10.0)
+        self.DIST_FOLLOWING_MAX:float = 3.0 # m
+        
+        # Threshold that counts as “at goal” (normalised units)
+        self.GOAL_THRESH = 0.1 / self.D_MAX
+        self.SAFE_FOLLOW_DIST = 2.0 / self.DIST_FOLLOWING_MAX    # normalised [0,1]
+        self.IDLE_PATIENCE    = 10.0 / self.T_IDLE_MAX     # normalised idle_timer tolerated
+        
+        self._previous_observations:dict = {c.id: [0]*obs_len for c in self.couriers}
         
         # Action space
         self.single_action_space = gym.spaces.Discrete(2) # 0 - idle, 1 - follow path
@@ -251,58 +287,109 @@ class WarehouseEnv(MultiAgentEnv):
             c1.other_couriers = [c2 for c2 in self.couriers if c1.id != c2.id]
         # ============ ================ ============
 
-    def _get_obs(self, agent_id):
+    def _get_obs(self, agent:Courier):
         """
         Get observation for a single agent:
-        - Own position
-        - Own navigation goal
-        - Own task goal
-        - Other agents' positions, nav goals, and task goals (sorted by distance to self)
-        """
+        - dx_to_goal [-1; 1]
+        - dy_to_goal [-1; 1]
+        - heading_sin [-1; 1]
+        - heading_cos [-1; 1]
+        - remaining_path_len [0; 1]
+        - idle_timer [0; 1]
+        - front_busy {0, 1}
+        - no_blocked_agents {0, 1}
+        - min_front_dist [0; 1]
+        - For 2 closest agents (if not enough agents, pad with 0):
+            - dx_rel [-1; 1]
+            - dy_rel [-1; 1]
+            - heading_sin [-1; 1]
+            - heading_cos [-1; 1]
+            - is_waiting {0, 1}
+            
+        :return observations:
+        """      
+        
         # Get reference agent
-        self_agent = next(c for c in self.couriers if c.id == agent_id)
-
-        # Own data
-        own_pos = [self_agent.position.x, self_agent.position.y, self_agent.position.theta]
-
-        nav_goal = self_agent.goal or Position(*own_pos)
-        own_nav = [nav_goal.x, nav_goal.y, nav_goal.theta]
-
-        task_goal = self_agent.active_task.active_goal if self_agent.active_task else Position(*own_pos)
-        own_task = [task_goal.x, task_goal.y, task_goal.theta]
-
-        # Prepare other agents' data
-        others = []
-        for c in self.couriers:
-            if c.id == agent_id:
+        goal = agent.goal if agent.goal else agent.position
+        pos = agent.position
+        
+        
+        # distance_to_goal
+        dx_to_goal = (goal.x - pos.x) / self.D_MAX
+        dy_to_goal = (goal.y - pos.y) / self.D_MAX
+        
+        # heading
+        heading_sin = np.sin(pos.theta)
+        heading_cos = np.cos(pos.theta)
+        
+        # remaining_path_len (m)
+        path = np.array(agent.path)[:,:2] if agent.path else []
+        rem_path_len = min(1.0, np.sum(np.linalg.norm(path[1:] - path[:-1], axis=1)) / self.D_MAX) if len(path) else 0.0
+        
+        # time spent idle
+        idle_time = min(1.0, agent._idle_time / self.T_IDLE_MAX)
+        
+        # is front of robot busy
+        is_front_occupied, _ = self._is_front_occupied(agent)
+        is_front_occupied = float(is_front_occupied)
+        
+        # is robot blocking other
+        # and
+        # distance to closest agent that is IN FRONT and is heading roughly the same way
+        
+        is_blocking_other = 0.0
+        _min_following_dist = self.DIST_FOLLOWING_MAX
+        other_ag_info = []
+        couriers_sorted_by_dist = sorted(self.couriers, key=lambda c: np.hypot(c.position.x - agent.position.x, c.position.y - agent.position.y))
+        for i, target_courier in enumerate(couriers_sorted_by_dist):
+            if target_courier.id == agent.id:
                 continue
+            
+            # get distance to closest agent that this agent is following
+            _diff = target_courier.position - agent.position
+            dist_to_target_courier = np.hypot(_diff.x, _diff.y)
+            _heading_err = _diff.theta # to other courier's (x,y)
+            _is_target_courier_in_front = _heading_err < self.HEADING_ERR_MAX
+            _agent_heading_diff = abs(target_courier.position.theta - agent.position.theta)
+            if _is_target_courier_in_front \
+                and _agent_heading_diff < self.HEADING_FOLLOWING_MAX \
+                and dist_to_target_courier < _min_following_dist:
+                    _min_following_dist = dist_to_target_courier
+            
+            # collect info about closest 2 agents
+            if i < 2:
+                _dx_rel = _diff.x / self.D_MAX
+                _dy_rel = _diff.y / self.D_MAX
+                
+                _is_waiting = float(target_courier._last_action == 0)
+                
+                _other_heading_sin = np.sin(target_courier.position.theta)
+                _other_heading_cos = np.cos(target_courier.position.theta)
+                
+                other_ag_info += [_dx_rel, _dy_rel, _other_heading_sin, _other_heading_cos, _is_waiting]
+            
+            
+            # is agent blocking someone else?
+            _other_blocked, _blocker_id = self._is_front_occupied(target_courier)
+            if _other_blocked and _blocker_id == agent.id:
+                is_blocking_other = 1.0
+            
+        closest_following_dist = min(1.0, _min_following_dist / self.HEADING_FOLLOWING_MAX)
+        
+        while len(other_ag_info) < 10:
+            other_ag_info.append(0.0)
+            
+        assert len(other_ag_info) == 10, f"Invalid other agent info list length ({len(other_ag_info)}). It must be 2x5=10."
+        
+        obs = np.array([dx_to_goal, dy_to_goal,
+                        heading_sin, heading_cos,
+                        rem_path_len,
+                        idle_time,
+                        is_front_occupied,
+                        is_blocking_other,
+                        closest_following_dist,
+                        ] + other_ag_info, dtype=np.float32)
 
-            pos = np.array([c.position.x, c.position.y])
-            dist = np.linalg.norm(pos - np.array([self_agent.position.x, self_agent.position.y]))
-
-            nav = c.goal or c.position
-            task = c.active_task.active_goal if c.active_task else c.position
-
-            other_data = {
-                "distance": dist,
-                "position": [c.position.x, c.position.y, c.position.theta],
-                "nav_goal": [nav.x, nav.y, nav.theta],
-                "task_goal": [task.x, task.y, task.theta],
-            }
-            others.append(other_data)
-
-        # Sort other agents by distance
-        others.sort(key=lambda d: d["distance"])
-
-        # Flatten other agents' data
-        others_flat = []
-        for o in others:
-            others_flat.extend(o["position"])
-            others_flat.extend(o["nav_goal"])
-            others_flat.extend(o["task_goal"])
-
-        # Final observation
-        obs = np.array(own_pos + own_nav + own_task + others_flat, dtype=np.float32)
         return obs
 
     def reset(self, *, seed=None, options=None):
@@ -324,15 +411,13 @@ class WarehouseEnv(MultiAgentEnv):
         self.TA.reset()
 
         # return observation dict and infos dict.
-        
-        # Observation is flat list of all [x, y, theta] positions, nav_goals and task_goals
-        # all agents have full info
         observations = {}
         infos = {}
         for courier in self.couriers:
-            observations[courier.id] = self._get_obs(courier.id)
+            observations[courier.id] = self._get_obs(courier)
             infos[courier.id] = {}
 
+        self.episode_steps = 0
 
         return observations, infos
         
@@ -349,111 +434,46 @@ class WarehouseEnv(MultiAgentEnv):
 
         # Empty return dicts
         obs, rewards, terminateds, infos = {}, {}, {}, {}
+        self.episode_steps += 1
         
         # perform task allocation step
         self.TA.run()
         
-        # get robot collisions
-        collisions = self._check_robot_collisions()
-        
-        agent_deadlocks = {}
-        validations_failed = {}
-
+        collided_at_least_once = False
         for courier in self.couriers:
-            
-
-            if self._check_deadlocks(courier, n=10):
-                agent_deadlocks[courier.id] = True
-            validations_failed[courier.id] = courier.failed_validations_in_row
-
-            #publish courier pos if not near loader/unloader
-            pub = True
-            for loader in self.loaders:
-                dist_to_loader = np.linalg.norm(np.array(courier.position()[:2]) - np.array(loader.position()[:2]))
-                if dist_to_loader < 1.0:
-                    pub = False
-                    break
-            for unloader in self.unloaders:
-                dist_to_unloader = np.linalg.norm(np.array(courier.position()[:2]) - np.array(unloader.position()[:2]))
-                if dist_to_unloader < 1.0:
-                    pub = False
-                    break
-            if pub:
-                courier.publish_position()
-
             c_id = courier.id
-            action = action_dict[c_id]
-
-            if courier.logging:
-                print(f"Courier {c_id} action: {action}")
-
-            if action == 0:
-                # stay idle
-                if courier.logging:
-                    print(f"Robot {c_id} is waiting.")
-            elif action == 1:
-                # make sure robot has goal and at least attempts to plan path
-                # set new goal if active task active goal differs
-                if courier.active_task and not courier.goal \
-                    and not (courier.active_task.status in (Task.AT_PICKUP, Task.AT_DROPOFF)):
-                    # update goal to active 
-                    courier.goal = courier.active_task.active_goal
-                    if courier.logging:
-                        print(f"Robot {c_id} set new goal to task target: {courier.goal}")
-
-
-                # validate path
-                if courier.goal:
-                    if not courier.validate_path(n=20):
-                        if courier.logging:
-                            print(f"Robot {c_id} path invalid. Replanning...")
-                        # trigger path replan
-                        courier.goal = courier.active_task.active_goal
-                        # replan local path
-                        # courier._replan_local_path(n=50)
-                       
-                
-                # follow path
-                courier.follow_path(dt=self.dt)
-                if courier.logging:
-                    print(f"Robot {c_id} is following path.")
-            else:
-                raise ValueError(f"Invalid action {action} for agent {c_id}.")
+            action = action_dict.get(c_id, None)
+            if action == None:
+                action = 0
+                print(f"[WARN] No action in action dict for agent [{c_id}]. Defaulting to aciton 0")
             
-             # Collect agent data
-            obs[c_id] = self._get_obs(c_id)
-            rewards[c_id] = self.get_reward(courier, collisions, action)
-            terminateds[c_id] = self.TA.delivered_tasks >= self.episode_length
-            infos[c_id] = {}
-
-        # adjust agent rewards based on deadlocks
-        for c_id, deadlock in agent_deadlocks.items():
-            if deadlock:
-                if action == 1: # following path
-                    # if only agent in deadlock, penalize
-                    if sum(agent_deadlocks.values()) == 1:
-                        rewards[c_id] -= 20 # agent should be waiting instead
-
-                if action == 0: # waiting
-                    # if at least 2 agents are in deadlock, penalize waiting
-                    if sum(agent_deadlocks.values()) >= 2: 
-                        rewards[c_id] -= 20 # agent should prevent such situations.
-
-
-        # if atleast 2 agents have too much failed validations in row, episode should end
-        failed_c = 0
-        for c_id, failed in validations_failed.items():
-            if failed >= 5:
-                failed_c += 1
-
-        if failed_c >= 2:
-            for c in self.couriers:
-                c.failed_validations_in_row = 0
+            # Perform action
+            courier.perform(action=action, previous_obs=self._previous_observations[c_id], dt=self.dt)
             
+            # get environment feedback
+            new_obs = self._get_obs(courier)
+            
+            collision, collided_id = self._check_single_robot_collision(courier)
+            if collision:
+                collided_at_least_once = True
+            # TODO check deadlocks
+            hard_limits_met = self._check_hard_limits()
+            
+            # collect episode data 
+            obs[c_id] = new_obs
+            rewards[c_id] = self.get_reward(
+                courier=courier,
+                prev_obs=self._previous_observations[c_id],
+                new_obs=new_obs,
+                collided=collision,
+                action=action)
+            
+            
+            # save as previous obs
+            self._previous_observations[c_id] = new_obs
+        
         # RLlib requires "__all__" key in done dict
-        terminateds["__all__"] = all(terminateds[agent.id] for agent in self.couriers) \
-              or len(collisions) > 0 or sum(agent_deadlocks.values()) >= 2 or failed_c >= 2
-        # end episode if at least 2 agents are in a deadlock
+        terminateds["__all__"] = hard_limits_met or collided_at_least_once
         truncateds = deepcopy(terminateds)
 
         if self.visualizer:
@@ -468,37 +488,68 @@ class WarehouseEnv(MultiAgentEnv):
         if self.visualizer:
             self.visualizer.render()
     
-    def get_reward(self, courier:Courier, collisions:List[Tuple[int, int]], action:int) -> float:
+    def get_reward(
+        self,
+        courier: Courier,
+        prev_obs: np.ndarray,
+        new_obs : np.ndarray,
+        collided: bool,
+        action  : int,
+    ) -> float:
         """
-        Calculate reward for courier.
+        Reward = ∑ w_i * term_i
+        All shaping terms use NORMALISED observation values.
         """
-        reward = 0 
-        
-        if action == 0: # waiting
-            if self._likely_prevented_collision(courier):
-                reward += 10
-            else:
-                reward -= 1
 
-        elif action == 1: # following path
-            if self._likely_blocking_path(courier):
-                reward -= 10
-            else:
-                reward += 10
+        w = self.DEFAULT_W
+        IDX = self.IDX
+        GOAL_THRESH = self.GOAL_THRESH
+        IDLE_PATIENCE = self.IDLE_PATIENCE
+        SAFE_FOLLOW_DIST = self.SAFE_FOLLOW_DIST
+        r = 0.0
 
-            # no path to follow
-            if not courier.path:
-                reward -= 5
+        # ------------------------------------------------------------------ #
+        # 1) Task-level progress (euclidean distance shrinkage to goal)
+        prev_dist = np.hypot(prev_obs[IDX["dx_to_goal"]], prev_obs[IDX["dy_to_goal"]])
+        new_dist  = np.hypot(new_obs [IDX["dx_to_goal"]], new_obs [IDX["dy_to_goal"]])
+        d_progress = prev_dist - new_dist # >0 if closer
+        r += w["progress"] * d_progress
 
-            # penalize causing collision
-            for col_ids in collisions:
-                if courier.id in col_ids:
-                    reward -= 50
-                    break
-        else:
-            raise ValueError(f"Invalid action {action} for agent {courier.id}.")
-        
-        return reward
+        # a large terminal bonus once agent is at goal
+        if new_dist < GOAL_THRESH and not courier._awarded_reached_goal:
+            r += w["goal_arrival"]
+            courier._awarded_reached_goal = True
+
+        # ------------------------------------------------------------------ #
+        # 2) Collisions (episode-ending)
+        if collided:
+            r += w["collision"]
+
+        # ------------------------------------------------------------------ #
+        # 3) Action-specific shaping
+        if action == 0: # WAIT
+            # How long has the agent idled
+            idle_now = new_obs[IDX["idle_timer"]]
+            # if front IS free and agent waits -> penalise
+            front_busy = new_obs[IDX["front_busy"]]
+            if idle_now > IDLE_PATIENCE and front_busy < 0.5:
+                r += w["idle_penalty"]
+
+        elif action == 1: # FOLLOW_PATH
+            # discourage attempting to move when there is no path
+            if new_obs[IDX["rem_path_len"]] < 1e-3:
+                r += w["plan_fail_penalty"]
+
+        # ------------------------------------------------------------------ #
+        # 4) Social-safety shaping
+        if new_obs[IDX["blocking_other"]] > 0.5:
+            r += w["blocking_penalty"]
+
+        # being too close to other agent that is being followed
+        if new_obs[IDX["closest_front_dist"]] < SAFE_FOLLOW_DIST:
+            r += w["follow_dist_penalty"]
+
+        return float(r)
 
     def _check_deadlocks(self, courier:Courier, n=5) -> bool:
         """
@@ -511,7 +562,17 @@ class WarehouseEnv(MultiAgentEnv):
         """
         return courier.failed_path_plan_attempts > n
         
-
+    def _check_single_robot_collision(self, courier:Courier) -> Tuple[bool, str]:
+        
+        courier_poly = Polygon(courier.get_bbox())
+        id_and_polygons = [(c.id, Polygon(c.get_bbox()) ) for c in self.couriers if c.id != courier.id]
+        
+        for rob_id_other, poly_other in id_and_polygons:
+            if courier_poly.intersects(poly_other):
+                return True, rob_id_other
+        
+        return False, None
+    
     def _check_robot_collisions(self) -> List[Tuple[str, str]]:
         """
         Checks collisions between robots.
@@ -530,31 +591,36 @@ class WarehouseEnv(MultiAgentEnv):
                     collisions.append((rob_id_1, rob_id_2))
         return collisions
     
-    def _likely_prevented_collision(self, courier:Courier) -> bool:
+    def _is_front_occupied(self, courier:Courier, d_lim:float=1.0) -> Tuple[bool, str]:
         """
-        Check if robot (likely) prevented collision by waiting
+        Check if robot (likely) prevented collision by waiting (waiting action is assumed)
+        
+        :Return bool | (bool, str):
         """
-        if not courier.path:
-            return False
-        # assumes action is 0 (waiting)
-        n_points = min(50, len(courier.path))
-
-        # get the next n points in the path
-        path_points = courier.path[:n_points]
-        for c in self.couriers:
-            if c.id == courier.id:
+              
+        for target_courier in self.couriers:
+            if target_courier.id == courier.id:
                 continue
-            # get distance to other courier from courier
-            dist = np.linalg.norm(np.array(c.position()[:2]) - np.array(courier.position()[:2]))
-            if dist > 3.0:
-                continue
-            # check if other courier is NEAR path
-            for point in path_points:
-                dist = np.linalg.norm(np.array(point[:2]) - np.array(c.position()[:2]))
-                if dist < 0.5:
-                    return True
-        return False
+            # get distance and heading error to other courier from courier
+            diff = target_courier.position - courier.position
+            
+            dist = np.hypot(diff.x, diff.y)
+            heading_error = diff.theta
+            
+            
+            if dist < d_lim and (-self.HEADING_ERR_MAX < heading_error < self.HEADING_ERR_MAX):
+                #print(f"{courier.id} is blocked by {target_courier.id}")
+                return True, target_courier.id
+          
+        return False, None
 
+    def _check_hard_limits(self) -> bool:
+        cond_agent_path_plan = any([c._failed_plans_in_row >= 3 for c in self.couriers])
+        cond_ep_steps = self.episode_steps > 2000
+        cond_delivered_tasks = self.TA.delivered_tasks >= self.episode_length
+        # TODO time in deadlock (2 agents not moving)
+        
+        return cond_agent_path_plan or cond_ep_steps
 
     def _likely_blocking_path(self, courier:Courier) -> bool:
         """

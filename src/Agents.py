@@ -37,8 +37,15 @@ class Courier(Robot):
         self.PC_publisher = PointCloudPublisher(self.navigator.node,
                                                 topic=f"/{robot_id}/position")
         
-        # validations
-        self.failed_validations_in_row = 0
+        # action metrics/counters
+        self._failed_validations_in_row:int = 0
+        self._failed_plans_in_row: int = 0
+        self._idle_time:float = 0.0
+        self._last_action:int = 0
+        self._path_plan_cooldown_counter:int = 0
+        
+        # reward metrics/counters
+        self._awarded_reached_goal = False
 
     def reset(self):
         """Resets Courier agent."""
@@ -46,6 +53,12 @@ class Courier(Robot):
         self.path.clear()
         self.position = Position(*self.init_pos()) # copy
         self.active_task:Task = None
+        
+        self._failed_validations_in_row:int = 0
+        self._failed_plans_in_row: int = 0
+        self._idle_time:float = 0.0
+        self._last_action:int = 0
+        self._path_plan_cooldown_counter:int = 0
     
     def publish_position(self):
         """
@@ -127,6 +140,66 @@ class Courier(Robot):
         self.failed_validations_in_row = 0
         return True
 
+    def perform(self, action: int, previous_obs:np.ndarray, dt:float):
+        """
+        Perform an action.
+        """
+        assert action in (0, 1), f"[{self.id}] Invalid action: {action}!"
+        
+        self._last_action = action
+        
+        # check distance to loader/unloader
+        if self.active_task:
+            dx_l = self.position.x - self.active_task.loader.position.x
+            dy_l = self.position.y - self.active_task.loader.position.y
+            dx_ul = self.position.x - self.active_task.unloader.position.x
+            dy_ul = self.position.y - self.active_task.unloader.position.y
+            dist_to_loader = np.hypot(dx_l, dy_l)
+            dist_to_unloader = np.hypot(dx_ul, dy_ul)
+        else:
+            dist_to_loader = 0.0
+            dist_to_unloader = 0.0
+        
+        # if not close to goal (loader or unloader)
+        if dist_to_unloader > 1.0 and dist_to_loader > 1.0:
+            # publish own position
+            self.publish_position()
+        
+        # Plan path if necessary (max every 10 steps)
+        if self._should_replan_path():
+            self._path_plan_cooldown_counter = 0
+            # update goal to active task (trigger path plan)
+            self.goal = self.active_task.active_goal
+            if self.path:
+                self._failed_plans_in_row = 0
+                
+                # when there is new path, clear goal reached reward flag
+                self._awarded_reached_goal = False
+            else:
+                self._failed_plans_in_row += 1
+                    
+        self._path_plan_cooldown_counter += 1           
+        if action == 0:
+            self._idle_time += dt
+        elif action == 1:
+            self._idle_time = 0.0 if self.follow_path() else self._idle_time+dt
+                   
+    def _should_replan_path(self) -> bool:
+        # should replan if no path, has task goal and is not at loader/unloader, and cooldown expired
+        is_blocked = not self.validate_path()
+        
+        if is_blocked:
+            # wait for replan
+            self.clear_goal()
+        if not self.active_task:
+            return False
+        
+        cond_no_path = self.active_task.active_goal and not self.path
+        cond_not_loading = not (self.active_task.status in (Task.AT_PICKUP, Task.AT_DROPOFF))
+        cond_cooldown_pass = self._path_plan_cooldown_counter >= 10
+        return (cond_no_path or is_blocked) and cond_not_loading and cond_cooldown_pass
+
+    
 class Loader:
     """
     Loaders spawn tasks.
