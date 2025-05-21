@@ -122,14 +122,13 @@ class Courier(Robot):
         self._path_plan_cooldown_counter += 1
         if self._should_replan_path():
             #if self.logging: 
-            print(f"[{self.id}] Needs path replan")
+            # print(f"[{self.id}] Needs path replan")
             self._path_plan_cooldown_counter = 0    
             # -----------------Path planning ----------------
             # reset planning map
             self.reset_planning_map()
             # add couriers as obstacles
             for c in self.other_couriers:
-                # TODO will need to be inflated?
                 # check distance to self
                 dist = np.hypot(*(self.position()[:2] - c.position()[:2]))
                 if dist < 3.0:
