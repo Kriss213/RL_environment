@@ -15,7 +15,7 @@ from copy import deepcopy
 from src.Agents import Courier, Loader, Unloader
 from src.Map import Map
 from src.Classes import Position, TaskAllocator, Task
-import rclpy
+# import rclpy
 
 import pygame
 import numpy as np
@@ -60,6 +60,7 @@ class WarehouseEnv(MultiAgentEnv):
                 'distance_tolerance': conf_robot.getfloat('distance_tolerance'),
                 'heading_tolerance': conf_robot.getfloat('heading_tolerance'),
                 'logging': conf_robot.getboolean('logging'),
+                'turn_radius': conf_robot.getfloat('turn_radius')
             },
             'COURIER': {
                 'logging': conf_courier.getboolean('logging'),
@@ -86,8 +87,8 @@ class WarehouseEnv(MultiAgentEnv):
         """
         Initialize MARL environment.
         """        
-        if not rclpy.ok():
-            rclpy.init()
+        # if not rclpy.ok():
+        #     rclpy.init()
 
         # ============ Parse config.ini ============
         #self.__config = configparser.ConfigParser()
@@ -255,6 +256,7 @@ class WarehouseEnv(MultiAgentEnv):
         dist_tolerance = self.config_robot['distance_tolerance']
         head_tolerance = self.config_robot['heading_tolerance']
         courier_logging = self.config_robot['logging']
+        turn_radius = self.config_robot['turn_radius']
 
         # ============ Initialize agents ============
         self.loaders = [
@@ -279,6 +281,7 @@ class WarehouseEnv(MultiAgentEnv):
                     dist_tolerance=dist_tolerance,
                     heading_tolerance=head_tolerance,
                     map=self.map, 
+                    turn_radius=turn_radius,
                     logging=courier_logging)
                     for i in range(1, len(init_robot_poses) + 1)
             ]

@@ -74,14 +74,8 @@ python3 -m venv learn_env
 ```
 pip install -r requirements.txt
 ```
-### Setup external ROS2 packages for path planning service
-https://github.com/Kriss213/vikings_bot
 
 ## Run training or test environment
-Start ```minimal_planner.launch.py``` (see https://github.com/Kriss213/vikings_bot)
-```
-ros2 launch vikings_bot_bringup minimal_planner.launch.py
-```
 ```
 python3 test/train_test.py
 ```

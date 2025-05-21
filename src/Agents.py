@@ -3,7 +3,7 @@ Contains all agent definitions.
 """
 from typing import List
 from src.Robot import Robot
-from src.Classes import Position, Task, PointCloudPublisher
+from src.Classes import Position, Task#, PointCloudPublisher
 import numpy as np
 from matplotlib.path import Path
 
@@ -19,6 +19,7 @@ class Courier(Robot):
                  footprint,
                  dist_tolerance:float,
                  heading_tolerance:float,
+                 turn_radius:float,
                  logging:bool=False):
         super().__init__(
             robot_id=robot_id,
@@ -27,6 +28,7 @@ class Courier(Robot):
             footprint=footprint,
             dist_tolerance=dist_tolerance,
             heading_tolerance=heading_tolerance,
+            turn_radius=turn_radius,
             logging=logging
         )
 
@@ -34,8 +36,8 @@ class Courier(Robot):
         self.active_task:Task = None
         self.other_couriers:List[Courier] = []
 
-        self.PC_publisher = PointCloudPublisher(self.navigator.node,
-                                                topic=f"/{robot_id}/position")
+        # self.PC_publisher = PointCloudPublisher(self.navigator.node,
+        #                                         topic=f"/{robot_id}/position")
         
         # action metrics/counters
         self._failed_validations_in_row:int = 0
@@ -46,6 +48,8 @@ class Courier(Robot):
         
         # reward metrics/counters
         self._awarded_reached_goal = False
+        
+        self._inflated_footprint = self.footprint + self.footprint / 2
 
     def reset(self):
         """Resets Courier agent."""
@@ -59,42 +63,8 @@ class Courier(Robot):
         self._idle_time:float = 0.0
         self._last_action:int = 0
         self._path_plan_cooldown_counter:int = 0
+        self.reset_planning_map()
     
-    def publish_position(self):
-        """
-        Converts current position to a PointCloud2 message and publishes it.
-        """
-        # if too close to task goal, do not publish to speed up simulation
-        # otherwise it prevents others from planning path to the same goal
-        if self.active_task is not None:
-            dist = np.linalg.norm(self.position()[:2] - self.active_task.unloader.position()[:2])
-            if dist < 1.5:
-                return
-
-        # Convert position to PointCloud2 message
-        corners = self.get_bbox()
-        resolution = 0.1
-        z_value = 0.0
-
-        min_x, min_y = np.min(corners, axis=0)
-        max_x, max_y = np.max(corners, axis=0)
-
-        x_vals = np.arange(min_x, max_x + resolution, resolution)
-        y_vals = np.arange(min_y, max_y + resolution, resolution)
-        xv, yv = np.meshgrid(x_vals, y_vals)
-        xy = np.vstack((xv.flatten(), yv.flatten())).T  # shape (N, 2)
-
-        # Filter: inside quadrilateral
-        path = Path(corners)
-        mask = path.contains_points(xy)
-        inside = xy[mask]
-
-        # Add z
-        z = np.full((inside.shape[0], 1), z_value)
-        points = np.hstack((inside, z)).astype(np.float32)
-
-        # createa PC2 message and publish
-        self.PC_publisher.publish_points(points)
 
     def validate_path(self, n:int=None):
         """
@@ -127,7 +97,7 @@ class Courier(Robot):
             # calculate pos distance to all path points
             dist = np.linalg.norm(next_path_points - pos, axis=1)
             # check if any distance is less than tolerance
-            if np.any(dist < 1.0):
+            if np.any(dist < 0.5):
                 # get other courier dist to their goal
                 if c.path:
                     dist_to_their_goal = np.linalg.norm(c.position()[:2] - c.path[-1][:2])
@@ -148,37 +118,37 @@ class Courier(Robot):
         
         self._last_action = action
         
-        # check distance to loader/unloader
-        if self.active_task:
-            dx_l = self.position.x - self.active_task.loader.position.x
-            dy_l = self.position.y - self.active_task.loader.position.y
-            dx_ul = self.position.x - self.active_task.unloader.position.x
-            dy_ul = self.position.y - self.active_task.unloader.position.y
-            dist_to_loader = np.hypot(dx_l, dy_l)
-            dist_to_unloader = np.hypot(dx_ul, dy_ul)
-        else:
-            dist_to_loader = 0.0
-            dist_to_unloader = 0.0
-        
-        # if not close to goal (loader or unloader)
-        if dist_to_unloader > 1.0 and dist_to_loader > 1.0:
-            # publish own position
-            self.publish_position()
-        
         # Plan path if necessary (max every 10 steps)
+        self._path_plan_cooldown_counter += 1
         if self._should_replan_path():
-            self._path_plan_cooldown_counter = 0
-            # update goal to active task (trigger path plan)
-            self.goal = self.active_task.active_goal
-            if self.path:
-                self._failed_plans_in_row = 0
+            #if self.logging: 
+            print(f"[{self.id}] Needs path replan")
+            self._path_plan_cooldown_counter = 0    
+            # -----------------Path planning ----------------
+            # reset planning map
+            self.reset_planning_map()
+            # add couriers as obstacles
+            for c in self.other_couriers:
+                # TODO will need to be inflated?
+                # check distance to self
+                dist = np.hypot(*(self.position()[:2] - c.position()[:2]))
+                if dist < 3.0:
+                    bbox = c.get_bbox(_footrprint=self._inflated_footprint)
+                    self.set_obstacle(bbox)
                 
+            # update goal to active task (trigger path plan)
+            if not self.goal and self.active_task:
+                self.goal = self.active_task.active_goal
+                        
+            if self.path:
+                self._failed_plans_in_row = 0    
                 # when there is new path, clear goal reached reward flag
                 self._awarded_reached_goal = False
             else:
                 self._failed_plans_in_row += 1
                     
-        self._path_plan_cooldown_counter += 1           
+                   
+        
         if action == 0:
             self._idle_time += dt
         elif action == 1:
@@ -186,7 +156,7 @@ class Courier(Robot):
                    
     def _should_replan_path(self) -> bool:
         # should replan if no path, has task goal and is not at loader/unloader, and cooldown expired
-        is_blocked = not self.validate_path()
+        is_blocked = not self.validate_path(n=30)
         
         if is_blocked:
             # wait for replan
@@ -196,7 +166,7 @@ class Courier(Robot):
         
         cond_no_path = self.active_task.active_goal and not self.path
         cond_not_loading = not (self.active_task.status in (Task.AT_PICKUP, Task.AT_DROPOFF))
-        cond_cooldown_pass = self._path_plan_cooldown_counter >= 10
+        cond_cooldown_pass = self._path_plan_cooldown_counter >= 10 or self._path_plan_cooldown_counter == 0
         return (cond_no_path or is_blocked) and cond_not_loading and cond_cooldown_pass
 
     
