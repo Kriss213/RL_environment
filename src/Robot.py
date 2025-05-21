@@ -115,7 +115,7 @@ class Robot:
         shape = self.planning_map.shape
         mask = polygon2mask(shape, poly)
         self.planning_map[mask] = self.map.OCCUPIED
-        
+        return mask
 
     def reset_planning_map(self):
         """
