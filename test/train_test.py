@@ -40,7 +40,8 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to a checkpoint to resume from")
     args = parser.parse_args()
 
-    ray.init()
+    context = ray.init()
+    print(context.dashboard_url)
 
     config = configparser.ConfigParser()
     config.read('config.ini')
@@ -58,12 +59,24 @@ if __name__ == "__main__":
         PPOConfig()
         .environment(env="warehouse_env", env_config=env_config)
         .framework("torch")
-        .env_runners(num_env_runners=0)
+        .env_runners(num_env_runners=20, num_envs_per_env_runner=1, num_cpus_per_env_runner=1)
         .resources(num_cpus_for_main_process=0)
         .learners(num_gpus_per_learner=1)
-        .rl_module(model_config={
-            'lr': 5e-4,
-        })
+        .training(
+            gamma=0.995,
+            lambda_=0.95,
+            lr=3e-4,
+            clip_param=0.25,
+            entropy_coeff=0.003,
+            train_batch_size=32_000,
+            minibatch_size=4_096,
+            num_sgd_iter=10,
+            vf_clip_param=5.0,
+            model={
+                "fcnet_hiddens": [256, 256],
+                "fcnet_activation": "tanh",
+            },
+        )
         .multi_agent(
             policies={
                 "shared_policy": (None, obs_space, act_space, {}),
@@ -80,7 +93,7 @@ if __name__ == "__main__":
     )
     iterations = 500
     run_config = tune.RunConfig(
-        name=f"warehouse_marl_train____{iterations}",
+        name=f"parallel_warehouse_marl_train_{iterations}",
         stop={"training_iteration": iterations},
         checkpoint_config=tune.CheckpointConfig(
             checkpoint_frequency=5,
