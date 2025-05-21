@@ -47,7 +47,8 @@ class WarehouseEnv(MultiAgentEnv):
                 'deliveries_per_episode': conf_env.getint('deliveries_per_episode'),
                 'visualize': conf_env.getboolean('visualize'),
                 'map_tuple' : Map.load_map(conf_env['map_yaml']),
-                'max_steps_per_episode': conf_env.getint('max_steps_per_episode')
+                'max_steps_per_episode': conf_env.getint('max_steps_per_episode'),
+                'max_plan_attempts': conf_env.getint('max_plan_attempts')
             },
             'TASK_ALLOCATION': {
                 'logging': conf_TA.getboolean('logging'),
@@ -100,6 +101,7 @@ class WarehouseEnv(MultiAgentEnv):
         self.logging = self.config_env['logging']
         self.deliveries_per_episode = self.config_env['deliveries_per_episode']
         self.MAX_EPISODE_STEPS = self.config_env['max_steps_per_episode']
+        self.PLAN_LIMIT = self.config_env['max_plan_attempts']
 
         # Task allocation config
         self.config_task_alloc = self.__config['TASK_ALLOCATION']
@@ -401,8 +403,13 @@ class WarehouseEnv(MultiAgentEnv):
             self.visualizer.render()
 
         # reset agents
-        for courier in self.couriers:
-            courier.reset()
+        # shuffle couriers
+        init_robot_poses = self.config_robot['init_poses']
+        shuffled_poses = np.random.permutation(init_robot_poses)
+        
+        for i, courier in enumerate(self.couriers):
+            pos = Position(x=shuffled_poses[i][0], y=shuffled_poses[i][1], theta=shuffled_poses[i][2])
+            courier.reset(pos)
         for loader in self.loaders:
             loader.reset()
         for unloader in self.unloaders:
@@ -475,7 +482,7 @@ class WarehouseEnv(MultiAgentEnv):
         hard_limits_met, limits = self._check_hard_limits()
         terminateds["__all__"] = hard_limits_met or collided_at_least_once
         if self.logging and (hard_limits_met or collided_at_least_once):
-            print(f'[EPISODE] Ending episode: Path plan failed >= 3 times in row: {limits[0]} | Episode steps > 5000 {limits[1]} | Collision: {collided_at_least_once}')
+            print(f'[EPISODE] Ending episode: Path plan failed >= {self.PLAN_LIMIT} times in row: {limits[0]} | Episode steps > 5000 {limits[1]} | Collision: {collided_at_least_once}')
         truncateds = deepcopy(terminateds)
 
         if self.visualizer:
@@ -627,7 +634,7 @@ class WarehouseEnv(MultiAgentEnv):
         return False, None
 
     def _check_hard_limits(self) -> bool:
-        cond_agent_path_plan = any([c._failed_plans_in_row >= 3 for c in self.couriers])
+        cond_agent_path_plan = any([c._failed_plans_in_row > self.PLAN_LIMIT for c in self.couriers])
         cond_ep_steps = self.episode_steps > self.MAX_EPISODE_STEPS
         cond_delivered_tasks = self.TA.delivered_tasks >= self.deliveries_per_episode
         # TODO time in deadlock (2 agents not moving)       

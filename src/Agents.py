@@ -5,6 +5,7 @@ from typing import List
 from src.Robot import Robot
 from src.Classes import Position, Task
 import numpy as np
+from typing import Any
 
 class Courier(Robot):
     """
@@ -48,11 +49,11 @@ class Courier(Robot):
         self._other_courier_map:np.ndarray = np.ones_like(self.planning_map) * self.map.FREE # A scaled binary map containint only other couriers
         
 
-    def reset(self):
+    def reset(self, pos:Position|Any=None):
         """Resets Courier agent."""
         self._goal = None
         self.path.clear()
-        self.position = Position(*self.init_pos()) # copy
+        self.position = Position(*self.init_pos()) if pos is None else pos # copy
         self.active_task:Task = None
         
         self._failed_plans_in_row: int = 0
