@@ -70,7 +70,7 @@ if __name__ == "__main__":
             entropy_coeff=0.003,
             train_batch_size=32_000,
             minibatch_size=4_096,
-            num_sgd_iter=10,
+            num_epochs=10,
             vf_clip_param=5.0,
             model={
                 "fcnet_hiddens": [256, 256],
