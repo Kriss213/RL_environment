@@ -42,11 +42,11 @@ Courier agents must learn to either FOLLOW_PATH or WAIT.
 
 **Reward function relies on observation. Reward weights:**  
 - Reward progress towards goal:  
-$W_{progress} = +10.0$  
+$W_{progress} = +5.0$  
 - One time reward for reaching goal  
-$W_{goal\_arrival} = +200.0$
+$W_{goal\_arrival} = +50.0$
 - Penalize collisions  
-$W_{collision} = -500.0$
+$W_{collision} = -100.0$
 - Penalize staying idle for no good reason  
 $W_{idle\_penalty} = -1.0$  
 - Penalize waiting while nothing blocks front  
@@ -54,8 +54,8 @@ $W_{idle\_penalty} = -1.0$
 - Penalize blocking somebody else  
   $W_{blocking\_penalty} = -8.0$  
 - Penalize tail-gating (dist < safe)  
-  $W_{follow\_dist\_penalty} = -3.0$  
-- Penalize path failure (FOLLOW_PATH but path length == 0)  
+  $W_{follow\_dist\_penalty} = -5.0$  
+- Penalize FOLLOW_PATH when either loading or unloading  
   $W_{plan\_fail\_penalty} = -3.0$   
 
 $$
@@ -74,14 +74,8 @@ python3 -m venv learn_env
 ```
 pip install -r requirements.txt
 ```
-### Setup external ROS2 packages for path planning service
-https://github.com/Kriss213/vikings_bot
 
 ## Run training or test environment
-Start ```minimal_planner.launch.py``` (see https://github.com/Kriss213/vikings_bot)
-```
-ros2 launch vikings_bot_bringup minimal_planner.launch.py
-```
 ```
 python3 test/train_test.py
 ```

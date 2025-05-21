@@ -11,11 +11,9 @@ from shapely.geometry import Polygon
 from PIL import Image
 from copy import deepcopy
 
-#from src.environment_entities import Robot, Loader, Unloader, CBBA
 from src.Agents import Courier, Loader, Unloader
 from src.Map import Map
-from src.Classes import Position, TaskAllocator, Task
-import rclpy
+from src.Classes import Position, TaskAllocator
 
 import pygame
 import numpy as np
@@ -46,9 +44,10 @@ class WarehouseEnv(MultiAgentEnv):
                 'downsample_factor': conf_env.getint('downsample_factor'),
                 'extra_padding': conf_env.getfloat('extra_padding'),
                 'logging': conf_env.getboolean('logging'),
-                'episode_length': conf_env.getint('episode_length'),
+                'deliveries_per_episode': conf_env.getint('deliveries_per_episode'),
                 'visualize': conf_env.getboolean('visualize'),
-                'map_tuple' : Map.load_map(conf_env['map_yaml'])
+                'map_tuple' : Map.load_map(conf_env['map_yaml']),
+                'max_steps_per_episode': conf_env.getint('max_steps_per_episode')
             },
             'TASK_ALLOCATION': {
                 'logging': conf_TA.getboolean('logging'),
@@ -60,6 +59,7 @@ class WarehouseEnv(MultiAgentEnv):
                 'distance_tolerance': conf_robot.getfloat('distance_tolerance'),
                 'heading_tolerance': conf_robot.getfloat('heading_tolerance'),
                 'logging': conf_robot.getboolean('logging'),
+                'turn_radius': conf_robot.getfloat('turn_radius')
             },
             'COURIER': {
                 'logging': conf_courier.getboolean('logging'),
@@ -86,9 +86,6 @@ class WarehouseEnv(MultiAgentEnv):
         """
         Initialize MARL environment.
         """        
-        if not rclpy.ok():
-            rclpy.init()
-
         # ============ Parse config.ini ============
         #self.__config = configparser.ConfigParser()
         self.__config = config
@@ -101,7 +98,8 @@ class WarehouseEnv(MultiAgentEnv):
         downsample_factor = self.config_env['downsample_factor']
         extra_padding = self.config_env['extra_padding']
         self.logging = self.config_env['logging']
-        self.episode_length = self.config_env['episode_length']
+        self.deliveries_per_episode = self.config_env['deliveries_per_episode']
+        self.MAX_EPISODE_STEPS = self.config_env['max_steps_per_episode']
 
         # Task allocation config
         self.config_task_alloc = self.__config['TASK_ALLOCATION']
@@ -161,14 +159,14 @@ class WarehouseEnv(MultiAgentEnv):
         
         # Default weights – override in call if needed
         self.DEFAULT_W = dict(
-            progress            = +10.0,   # reward per delta progress to goal
-            goal_arrival        = +200.0,  # one-time bonus when dx & dy both ~0
-            collision           = -500.0,
+            progress            = +5.0,   # reward per delta progress to goal
+            goal_arrival        = +50.0,  # one-time bonus when dx & dy both ~0
+            collision           = -100.0,
             idle_penalty        = -1.0,    # per step when WAIT without good reason
             front_busy_penalty  = -5.0,    # waiting while nothing blocks front
             blocking_penalty    = -8.0,    # is blocking somebody else
-            follow_dist_penalty = -3.0,    # tail-gating, dist < safe
-            plan_fail_penalty   = -3.0,    # FOLLOW_PATH but path length == 0
+            follow_dist_penalty = -5.0,    # tail-gating, dist < safe
+            move_when_busy_penalty   = -3.0,    # FOLLOW_PATH but is either loading or unloading
         )
         
         
@@ -255,6 +253,7 @@ class WarehouseEnv(MultiAgentEnv):
         dist_tolerance = self.config_robot['distance_tolerance']
         head_tolerance = self.config_robot['heading_tolerance']
         courier_logging = self.config_robot['logging']
+        turn_radius = self.config_robot['turn_radius']
 
         # ============ Initialize agents ============
         self.loaders = [
@@ -279,6 +278,7 @@ class WarehouseEnv(MultiAgentEnv):
                     dist_tolerance=dist_tolerance,
                     heading_tolerance=head_tolerance,
                     map=self.map, 
+                    turn_radius=turn_radius,
                     logging=courier_logging)
                     for i in range(1, len(init_robot_poses) + 1)
             ]
@@ -448,7 +448,7 @@ class WarehouseEnv(MultiAgentEnv):
                 print(f"[WARN] No action in action dict for agent [{c_id}]. Defaulting to aciton 0")
             
             # Perform action
-            courier.perform(action=action, previous_obs=self._previous_observations[c_id], dt=self.dt)
+            courier.perform(action=action, dt=self.dt)
             
             # get environment feedback
             new_obs = self._get_obs(courier)
@@ -457,8 +457,7 @@ class WarehouseEnv(MultiAgentEnv):
             if collision:
                 collided_at_least_once = True
             # TODO check deadlocks
-            hard_limits_met = self._check_hard_limits()
-            
+        
             # collect episode data 
             obs[c_id] = new_obs
             rewards[c_id] = self.get_reward(
@@ -473,7 +472,10 @@ class WarehouseEnv(MultiAgentEnv):
             self._previous_observations[c_id] = new_obs
         
         # RLlib requires "__all__" key in done dict
+        hard_limits_met, limits = self._check_hard_limits()
         terminateds["__all__"] = hard_limits_met or collided_at_least_once
+        if self.logging and (hard_limits_met or collided_at_least_once):
+            print(f'[EPISODE] Ending episode: Path plan failed >= 3 times in row: {limits[0]} | Episode steps > 5000 {limits[1]} | Collision: {collided_at_least_once}')
         truncateds = deepcopy(terminateds)
 
         if self.visualizer:
@@ -527,6 +529,8 @@ class WarehouseEnv(MultiAgentEnv):
 
         # ------------------------------------------------------------------ #
         # 3) Action-specific shaping
+        at_goal = new_obs[IDX["dy_to_goal"]] < 1e-4 and new_obs[IDX["dx_to_goal"]] < 1e-4
+        
         if action == 0: # WAIT
             # How long has the agent idled
             idle_now = new_obs[IDX["idle_timer"]]
@@ -535,10 +539,16 @@ class WarehouseEnv(MultiAgentEnv):
             if idle_now > IDLE_PATIENCE and front_busy < 0.5:
                 r += w["idle_penalty"]
 
+            # discourage waiting when there is no path
+            # and front is not blocked
+            if front_busy < 0.5 and new_obs[IDX["rem_path_len"]] < 1e-3:
+                r += w["idle_penalty"]
+                
         elif action == 1: # FOLLOW_PATH
-            # discourage attempting to move when there is no path
-            if new_obs[IDX["rem_path_len"]] < 1e-3:
-                r += w["plan_fail_penalty"]
+            # discourage attempting to move when
+            # task status is at loading or at dropoff (exactly at goal)
+            if at_goal:
+                r += w["move_when_busy_penalty"]
 
         # ------------------------------------------------------------------ #
         # 4) Social-safety shaping
@@ -605,48 +615,23 @@ class WarehouseEnv(MultiAgentEnv):
             diff = target_courier.position - courier.position
             
             dist = np.hypot(diff.x, diff.y)
-            heading_error = diff.theta
+            dist = np.hypot(diff.x, diff.y)
+            heading_to_other_courier = np.arctan2(diff.y, diff.x)
+            heading_error = heading_to_other_courier - courier.position.theta
+            heading_error=  (heading_error+np.pi) % (2 * np.pi) - np.pi
             
             
             if dist < d_lim and (-self.HEADING_ERR_MAX < heading_error < self.HEADING_ERR_MAX):
-                #print(f"{courier.id} is blocked by {target_courier.id}")
                 return True, target_courier.id
           
         return False, None
 
     def _check_hard_limits(self) -> bool:
         cond_agent_path_plan = any([c._failed_plans_in_row >= 3 for c in self.couriers])
-        cond_ep_steps = self.episode_steps > 2000
-        cond_delivered_tasks = self.TA.delivered_tasks >= self.episode_length
-        # TODO time in deadlock (2 agents not moving)
-        
-        return cond_agent_path_plan or cond_ep_steps
-
-    def _likely_blocking_path(self, courier:Courier) -> bool:
-        """
-        Check if robot (likely) is blocking someone's path by moving
-        """
-
-        if not courier.path:
-            return False
-
-        # assumes action is 1 (following path)
-        for c in self.couriers:
-            if c.id == courier.id:
-                continue
-            # get distance to other courier from courier
-            dist = np.linalg.norm(np.array(c.position()[:2]) - np.array(courier.position()[:2]))
-            if dist > 3.0 or not c.path:
-                continue
-            # check if courier is NEAR other courier's path points
-            n_points = min(50, len(courier.path))
-            path_points = c.path[:n_points]
-            for point in path_points:
-                dist = np.linalg.norm(np.array(point[:2]) - np.array(c.position()[:2]))
-                if dist < 0.5:
-                    return True
-        return False
-
+        cond_ep_steps = self.episode_steps > self.MAX_EPISODE_STEPS
+        cond_delivered_tasks = self.TA.delivered_tasks >= self.deliveries_per_episode
+        # TODO time in deadlock (2 agents not moving)       
+        return cond_agent_path_plan or cond_ep_steps, (cond_agent_path_plan, cond_ep_steps)
         
     
 class Visualize:
