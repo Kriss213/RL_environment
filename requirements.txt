@@ -1,6 +1,6 @@
 # on Python 3.10.12
 # on Ubuntu 22.04
-ray[rllib]==2.46.0
+ray[rllib,default]==2.46.0
 pygame
 gymnasium
 torch
