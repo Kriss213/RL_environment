@@ -66,20 +66,20 @@ if __name__ == "__main__":
             use_critic=True,
             gamma=0.995,
             lambda_=0.95,
-            lr=1e-5,
+            lr=1e-4,
             clip_param=0.2,
-            entropy_coeff=[[0,0.003],[1e6,0.0005]],
+            entropy_coeff=[[0, 0.01], [2e6,0.0001]],
             kl_coeff=0.5,
             kl_target=0.005,
-            train_batch_size=32_000,
-            minibatch_size=4_096,
+            train_batch_size=16_000,
+            minibatch_size=2_048,
             num_epochs=10,
-            vf_clip_param=5.0,
+            vf_clip_param=1000.0, # should be bit larger than realistic mean episode return
+            vf_loss_coeff=0.25,
             model={
-                "fcnet_hiddens": [512, 512],
-                "fcnet_activation": "tanh",
+                "fcnet_activation": "relu",
                 "use_lstm": True,
-                "max_seq_len": 20
+                "max_seq_len": 50
             },
         )
         .multi_agent(
@@ -98,7 +98,7 @@ if __name__ == "__main__":
     )
     iterations = 500
     run_config = tune.RunConfig(
-        name=f"test_parallel_warehouse_marl_train_{iterations}",
+        name=f"parallel_warehouse_marl_train_23_05_{iterations}",
         stop={"training_iteration": iterations},
         checkpoint_config=tune.CheckpointConfig(
             checkpoint_frequency=5,

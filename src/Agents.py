@@ -6,6 +6,7 @@ from src.Robot import Robot
 from src.Classes import Position, Task
 import numpy as np
 from typing import Any
+from collections import deque
 
 class Courier(Robot):
     """
@@ -38,15 +39,23 @@ class Courier(Robot):
         # action metrics/counters
         self._failed_plans_in_row: int = 0
         self._idle_time:float = 0.0
-        self._last_action:int = 0
+        self._last_actions:deque= deque([0], maxlen=20) # 1 init to avoid div by zero when using len() in init stages
         self._path_plan_cooldown_counter:int = 0
         
         # reward metrics/counters
         self._awarded_reached_goal = False
         
-        self._inflated_footprint = self.footprint + self.footprint / 2
+        # sign doesnt matter
+        footprint_dx, footprint_dy = np.min(self.footprint), np.max(self.footprint)
+        radius = np.hypot(footprint_dx, footprint_dy)
+        footprint_inflation_d = np.cos(np.deg2rad(45.0)) * radius
+        self._inflated_footprint = self.footprint + np.where(self.footprint>0, +footprint_inflation_d, -footprint_inflation_d)
+        
+        # Calculate the inflated costmap. The largest possible 
+        #self._inflated_footprint = self.footprint + self.footprint / 1.5
         
         self._other_courier_map:np.ndarray = np.ones_like(self.planning_map) * self.map.FREE # A scaled binary map containint only other couriers
+        self.d_lim_path_blocked:float = 2.0 # distance to check for blocked path
         
 
     def reset(self, pos:Position|Any=None):
@@ -58,11 +67,11 @@ class Courier(Robot):
         
         self._failed_plans_in_row: int = 0
         self._idle_time:float = 0.0
-        self._last_action:int = 0
+        self._last_actions:deque= deque([0], maxlen=20)# 1 init to avoid div by zero when using len() in init stages
         self._path_plan_cooldown_counter:int = 0
         self.reset_planning_map()
     
-    def _is_path_blocked(self, distance_lim:float=2.0):# -> Tuple[bool, str]:
+    def _is_path_blocked(self):# -> Tuple[bool, str]:
         """
         Check if in given distance another courier blocks the path
         **NOTE:** This does not check for static obstacles because DUBINS might add curves that are slightly too close to map obstacles
@@ -82,11 +91,11 @@ class Courier(Robot):
             path_deltas = np.diff(path_xy, axis=0)
             segment_lengths = np.linalg.norm(path_deltas, axis=1)
             total_len = np.sum(segment_lengths)
-            if total_len < distance_lim:
+            if total_len < self.d_lim_path_blocked:
                 n = len(path)
             else:
                 cum_dist = np.cumsum(segment_lengths)
-                n = np.searchsorted(cum_dist, distance_lim, side='right')
+                n = np.searchsorted(cum_dist, self.d_lim_path_blocked, side='right')
                 
             path_to_check = path_xy[:n]
             
@@ -106,7 +115,10 @@ class Courier(Robot):
         """
         assert action in (0, 1), f"[{self.id}] Invalid action: {action}!"
         
-        self._last_action = action
+        self._last_actions.append(action)
+        
+        # Make sure that planning map is updated
+        self.update_planning_map()
          
         if action == 0:
             self._idle_time += dt
@@ -159,7 +171,7 @@ class Courier(Robot):
         for c in self.other_couriers:
             # check distance to self
             dist = np.hypot(*(self.position()[:2] - c.position()[:2]))
-            if dist < 3.0:
+            if dist < 5.0:
                 bbox = c.get_bbox(_footrprint=self._inflated_footprint)
                 self.set_obstacle(bbox)
         

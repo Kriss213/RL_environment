@@ -233,8 +233,13 @@ class Robot:
 
     def follow_path(self) -> bool:
         """
-        Follows the path step-by-step using proportional control.
-        Respects heading and distance tolerances.
+        Follows path assuming it has x, y, theta (yaw).
+        
+        Args:
+        :param courier_map: map to check for other couriers to see if following path would cause collision
+        
+        Return:
+        :return moved: True if has path and move is possible
         """
         if self.path:
             self.position.x = self.path[0][0]
