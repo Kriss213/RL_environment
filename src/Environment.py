@@ -161,11 +161,11 @@ class WarehouseEnv(MultiAgentEnv):
         
         # Default weights – override in call if needed
         self.DEFAULT_W = dict(
-            progress            = 1.0,   # reward per delta progress to goal
-            goal_arrival        = 50.0,  # one-time bonus when dx & dy both ~0
+            progress            = 3.0,   # reward per delta progress to goal
+            goal_arrival        = 60.0,  # one-time bonus when dx & dy both ~0
             collision           = -50.0,
-            yielding            = 0.3,   # avoided collision by yielding
-            correct_move_reward = 0.3,   # reward agent when following path when it should
+            yielding            = 2.0,   # avoided collision by yielding
+            correct_move_reward = 2.0,   # reward agent when following path when it should
             idle_penalty        = -0.5,     # per step when WAIT without good reason
             front_not_busy_penalty  = -5.0,     # waiting while nothing blocks front
             blocking_penalty    = -1.0,     # is blocking somebody else
@@ -173,6 +173,7 @@ class WarehouseEnv(MultiAgentEnv):
             move_when_busy_penalty   = -0.2,    # FOLLOW_PATH but is either loading or unloading
             time_penalty        = -0.05,    # single time step penalty
             unblocking_bonus    = 1.0,      # reward agents unblocking
+            failed_plan_penalty = -5.0,      # penalize attempted move that lead to failed replan
         )
         self.APPROX_MAX_REWARD = sum([w for w in self.DEFAULT_W.values() if w>0])
         
@@ -359,8 +360,10 @@ class WarehouseEnv(MultiAgentEnv):
             # get distance to closest agent that this agent is following
             _diff = target_courier.position - agent.position
             dist_to_target_courier = np.hypot(_diff.x, _diff.y)
-            _heading_err = _diff.theta # to other courier's (x,y)
-            _is_target_courier_in_front = _heading_err < self.HEADING_ERR_MAX
+            _heading_err = agent.position.theta - np.arctan2(_diff.y, _diff.x)
+            _heading_err = (_heading_err + np.pi) % (2*np.pi) - np.pi
+            
+            _is_target_courier_in_front = -self.HEADING_ERR_MAX < _heading_err < self.HEADING_ERR_MAX
             _agent_heading_diff = abs(target_courier.position.theta - agent.position.theta)
             if _is_target_courier_in_front \
                 and _agent_heading_diff < self.HEADING_FOLLOWING_MAX \
@@ -409,9 +412,6 @@ class WarehouseEnv(MultiAgentEnv):
         """
         Reset the environment to original state.
         """
-        
-        if self.visualizer:
-            self.visualizer.render()
 
         # reset agents
         # shuffle couriers
@@ -428,6 +428,9 @@ class WarehouseEnv(MultiAgentEnv):
             
         self.TA.reset()
 
+        if self.visualizer:
+            self.visualizer.render()
+        
         # return observation dict and infos dict.
         observations = {}
         infos = {}
@@ -498,9 +501,6 @@ class WarehouseEnv(MultiAgentEnv):
 
         if self.visualizer:
             self.render()
-        
-        if hard_limits_met or collided_at_least_once:
-            input('episode end. Continue?')
         
         return obs, rewards, terminateds, truncateds, infos
 
@@ -597,9 +597,15 @@ class WarehouseEnv(MultiAgentEnv):
             if at_goal:
                 r += w["move_when_busy_penalty"]
             else:
-                # reward following path when not blocked or at loader/unloader
+                # reward following path when not blocked or not at loader/unloader
                 if front_busy < 0.5 and new_obs[IDX["rem_path_len"]] > 0:
                     r += w["correct_move_reward"]
+                    
+                # penalize not having path (failed replans)
+                # and not being at goal
+                if new_obs[IDX['rem_path_len']] < 1e-4:
+                    r+= w['failed_plan_penalty']
+                    
 
         # ------------------------------------------------------------------ #
         # 4) Social-safety shaping

@@ -98,7 +98,7 @@ if __name__ == "__main__":
     )
     iterations = 500
     run_config = tune.RunConfig(
-        name=f"parallel_warehouse_marl_train_23_05_{iterations}",
+        name=f"parallel_warehouse_marl_train_24_05_{iterations}",
         stop={"training_iteration": iterations},
         checkpoint_config=tune.CheckpointConfig(
             checkpoint_frequency=5,
