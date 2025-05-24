@@ -161,15 +161,21 @@ class WarehouseEnv(MultiAgentEnv):
         
         # Default weights – override in call if needed
         self.DEFAULT_W = dict(
-            progress            = +5.0,   # reward per delta progress to goal
-            goal_arrival        = +50.0,  # one-time bonus when dx & dy both ~0
-            collision           = -100.0,
-            idle_penalty        = -1.0,    # per step when WAIT without good reason
-            front_busy_penalty  = -5.0,    # waiting while nothing blocks front
-            blocking_penalty    = -8.0,    # is blocking somebody else
-            follow_dist_penalty = -5.0,    # tail-gating, dist < safe
-            move_when_busy_penalty   = -3.0,    # FOLLOW_PATH but is either loading or unloading
+            progress            = 3.0,   # reward per delta progress to goal
+            goal_arrival        = 60.0,  # one-time bonus when dx & dy both ~0
+            collision           = -50.0,
+            yielding            = 2.0,   # avoided collision by yielding
+            correct_move_reward = 2.0,   # reward agent when following path when it should
+            idle_penalty        = -0.5,     # per step when WAIT without good reason
+            front_not_busy_penalty  = -5.0,     # waiting while nothing blocks front
+            blocking_penalty    = -1.0,     # is blocking somebody else
+            follow_dist_penalty = -0.5,     # tail-gating, dist < safe
+            move_when_busy_penalty   = -0.2,    # FOLLOW_PATH but is either loading or unloading
+            time_penalty        = -0.05,    # single time step penalty
+            unblocking_bonus    = 1.0,      # reward agents unblocking
+            failed_plan_penalty = -5.0,      # penalize attempted move that lead to failed replan
         )
+        self.APPROX_MAX_REWARD = sum([w for w in self.DEFAULT_W.values() if w>0])
         
         
         # OBSERVATION CONSTANTS
@@ -178,9 +184,10 @@ class WarehouseEnv(MultiAgentEnv):
         self.HEADING_ERR_MAX:float = np.deg2rad(35.0)
         self.HEADING_FOLLOWING_MAX:float = np.deg2rad(10.0)
         self.DIST_FOLLOWING_MAX:float = 3.0 # m
+        self.LAST_ACTIONS_WAIT_THRESHOLD:float = 0.5 # if more that 50% of last actions are WAIT, then agent is waiting
         
         # Threshold that counts as “at goal” (normalised units)
-        self.GOAL_THRESH = 0.1 / self.D_MAX
+        self.GOAL_THRESH = 0.05 / self.D_MAX
         self.SAFE_FOLLOW_DIST = 2.0 / self.DIST_FOLLOWING_MAX    # normalised [0,1]
         self.IDLE_PATIENCE    = 10.0 / self.T_IDLE_MAX     # normalised idle_timer tolerated
         
@@ -284,10 +291,13 @@ class WarehouseEnv(MultiAgentEnv):
                     logging=courier_logging)
                     for i in range(1, len(init_robot_poses) + 1)
             ]
+        # which agents are blocking who
+        self.agent_blocking_map:Dict[str, List] = {}
         for c1 in self.couriers:
             # set other courier positions
             c1.other_couriers = [c2 for c2 in self.couriers if c1.id != c2.id]
-        # ============ ================ ============
+            self.agent_blocking_map[c1.id] = []
+        # ============ ================ ============      
 
     def _get_obs(self, agent:Courier):
         """
@@ -338,7 +348,7 @@ class WarehouseEnv(MultiAgentEnv):
         # is robot blocking other
         # and
         # distance to closest agent that is IN FRONT and is heading roughly the same way
-        
+        self.agent_blocking_map[agent.id].clear()
         is_blocking_other = 0.0
         _min_following_dist = self.DIST_FOLLOWING_MAX
         other_ag_info = []
@@ -350,8 +360,10 @@ class WarehouseEnv(MultiAgentEnv):
             # get distance to closest agent that this agent is following
             _diff = target_courier.position - agent.position
             dist_to_target_courier = np.hypot(_diff.x, _diff.y)
-            _heading_err = _diff.theta # to other courier's (x,y)
-            _is_target_courier_in_front = _heading_err < self.HEADING_ERR_MAX
+            _heading_err = agent.position.theta - np.arctan2(_diff.y, _diff.x)
+            _heading_err = (_heading_err + np.pi) % (2*np.pi) - np.pi
+            
+            _is_target_courier_in_front = -self.HEADING_ERR_MAX < _heading_err < self.HEADING_ERR_MAX
             _agent_heading_diff = abs(target_courier.position.theta - agent.position.theta)
             if _is_target_courier_in_front \
                 and _agent_heading_diff < self.HEADING_FOLLOWING_MAX \
@@ -363,7 +375,8 @@ class WarehouseEnv(MultiAgentEnv):
                 _dx_rel = _diff.x / self.D_MAX
                 _dy_rel = _diff.y / self.D_MAX
                 
-                _is_waiting = float(target_courier._last_action == 0)
+                last_acts = target_courier._last_actions
+                _is_waiting = float(last_acts.count(0) / len(last_acts) > self.LAST_ACTIONS_WAIT_THRESHOLD)
                 
                 _other_heading_sin = np.sin(target_courier.position.theta)
                 _other_heading_cos = np.cos(target_courier.position.theta)
@@ -374,9 +387,10 @@ class WarehouseEnv(MultiAgentEnv):
             # is agent blocking someone else?
             _other_blocked, _blocker_id = self._is_front_occupied(target_courier)
             if _other_blocked and _blocker_id == agent.id:
+                self.agent_blocking_map[agent.id].append(target_courier.id)
                 is_blocking_other = 1.0
             
-        closest_following_dist = min(1.0, _min_following_dist / self.HEADING_FOLLOWING_MAX)
+        closest_following_dist = min(1.0, _min_following_dist / self.DIST_FOLLOWING_MAX)
         
         while len(other_ag_info) < 10:
             other_ag_info.append(0.0)
@@ -398,9 +412,6 @@ class WarehouseEnv(MultiAgentEnv):
         """
         Reset the environment to original state.
         """
-        
-        if self.visualizer:
-            self.visualizer.render()
 
         # reset agents
         # shuffle couriers
@@ -417,6 +428,9 @@ class WarehouseEnv(MultiAgentEnv):
             
         self.TA.reset()
 
+        if self.visualizer:
+            self.visualizer.render()
+        
         # return observation dict and infos dict.
         observations = {}
         infos = {}
@@ -482,7 +496,7 @@ class WarehouseEnv(MultiAgentEnv):
         hard_limits_met, limits = self._check_hard_limits()
         terminateds["__all__"] = hard_limits_met or collided_at_least_once
         if self.logging and (hard_limits_met or collided_at_least_once):
-            print(f'[EPISODE] Ending episode: Path plan failed >= {self.PLAN_LIMIT} times in row: {limits[0]} | Episode steps > 5000 {limits[1]} | Collision: {collided_at_least_once}')
+            print(f'[EPISODE] Ending episode: Path plan failed >= {self.PLAN_LIMIT} times in row: {limits[0]} | Episode steps > {self.MAX_EPISODE_STEPS} {limits[1]} | Collision: {collided_at_least_once}')
         truncateds = deepcopy(terminateds)
 
         if self.visualizer:
@@ -517,6 +531,8 @@ class WarehouseEnv(MultiAgentEnv):
         SAFE_FOLLOW_DIST = self.SAFE_FOLLOW_DIST
         r = 0.0
 
+        r += w['time_penalty']
+
         # ------------------------------------------------------------------ #
         # 1) Task-level progress (euclidean distance shrinkage to goal)
         prev_dist = np.hypot(prev_obs[IDX["dx_to_goal"]], prev_obs[IDX["dy_to_goal"]])
@@ -525,7 +541,9 @@ class WarehouseEnv(MultiAgentEnv):
         r += w["progress"] * d_progress
 
         # a large terminal bonus once agent is at goal
-        if new_dist < GOAL_THRESH and not courier._awarded_reached_goal:
+        # new_dist MUST be greater than 0 to avoid false
+        # awards when there is no goal/path
+        if 0.0 < new_dist < GOAL_THRESH and not courier._awarded_reached_goal:
             r += w["goal_arrival"]
             courier._awarded_reached_goal = True
 
@@ -538,35 +556,70 @@ class WarehouseEnv(MultiAgentEnv):
         # 3) Action-specific shaping
         at_goal = new_obs[IDX["dy_to_goal"]] < 1e-4 and new_obs[IDX["dx_to_goal"]] < 1e-4
         
+        front_busy = new_obs[IDX["front_busy"]]
         if action == 0: # WAIT
             # How long has the agent idled
             idle_now = new_obs[IDX["idle_timer"]]
             # if front IS free and agent waits -> penalise
-            front_busy = new_obs[IDX["front_busy"]]
             if idle_now > IDLE_PATIENCE and front_busy < 0.5:
                 r += w["idle_penalty"]
 
-            # discourage waiting when there is no path
+            # discourage waiting when there is path
             # and front is not blocked
             if front_busy < 0.5 and new_obs[IDX["rem_path_len"]] < 1e-3:
-                r += w["idle_penalty"]
+                r += w["front_not_busy_penalty"]
+                
+            # reward collision avoidance by yielding
+            # but only if not blocking the agent it is yielding
+            #       |----|      |----|
+            #    a1 | -> |      | <- | a2   -> no reward
+            #       |----|      |----|
+            
+            #       |----|      |-|--|
+            #    a1 | -> |      | V  | a2   -> reward a1 for yielding
+            #       |----|      |----|
+            # BUT only if the blocked agent is moving
+            # otherwise agents learn to stand still in a jam
+            for other_c in courier.other_couriers:
+                #is a2 blocking a1?
+                if courier.id in self.agent_blocking_map[other_c.id]:
+                    # is a1 NOT blocking a2?
+                    if not (other_c.id in self.agent_blocking_map[courier.id]) \
+                        and other_c._last_actions.count(1) / len(other_c._last_actions) <= 1-self.LAST_ACTIONS_WAIT_THRESHOLD:
+                            # assume that agent is moving if in last actions at least 50% is follow path
+                        r += w["yielding"]
+                        break
+                    
                 
         elif action == 1: # FOLLOW_PATH
             # discourage attempting to move when
             # task status is at loading or at dropoff (exactly at goal)
             if at_goal:
                 r += w["move_when_busy_penalty"]
+            else:
+                # reward following path when not blocked or not at loader/unloader
+                if front_busy < 0.5 and new_obs[IDX["rem_path_len"]] > 0:
+                    r += w["correct_move_reward"]
+                    
+                # penalize not having path (failed replans)
+                # and not being at goal
+                if new_obs[IDX['rem_path_len']] < 1e-4:
+                    r+= w['failed_plan_penalty']
+                    
 
         # ------------------------------------------------------------------ #
         # 4) Social-safety shaping
         if new_obs[IDX["blocking_other"]] > 0.5:
             r += w["blocking_penalty"]
+            
+        if prev_obs[IDX["blocking_other"]] > 0.5 and new_obs[IDX["blocking_other"]] < 0.5:
+            r += w["unblocking_bonus"]
 
         # being too close to other agent that is being followed
         if new_obs[IDX["closest_front_dist"]] < SAFE_FOLLOW_DIST:
             r += w["follow_dist_penalty"]
 
-        return float(r)
+        return float(r / self.APPROX_MAX_REWARD)
 
     def _check_deadlocks(self, courier:Courier, n=5) -> bool:
         """
@@ -608,14 +661,16 @@ class WarehouseEnv(MultiAgentEnv):
                     collisions.append((rob_id_1, rob_id_2))
         return collisions
     
-    def _is_front_occupied(self, courier:Courier, d_lim:float=1.0) -> Tuple[bool, str]:
+    def _is_front_occupied(self, courier:Courier) -> Tuple[bool, str]:
         """
-        Check if robot (likely) prevented collision by waiting (waiting action is assumed)
+        Check if robot's front is occupied in its facing direction += HEADING_ERROR
         
         :Return bool | (bool, str):
         """
               
         for target_courier in self.couriers:
+            # Distance to check. It should be slightly greater than replan distance check function to incetivize yielding before replanning.
+            distance_lim = courier.d_lim_path_blocked * 1.1
             if target_courier.id == courier.id:
                 continue
             # get distance and heading error to other courier from courier
@@ -628,7 +683,7 @@ class WarehouseEnv(MultiAgentEnv):
             heading_error=  (heading_error+np.pi) % (2 * np.pi) - np.pi
             
             
-            if dist < d_lim and (-self.HEADING_ERR_MAX < heading_error < self.HEADING_ERR_MAX):
+            if dist < distance_lim and (-self.HEADING_ERR_MAX < heading_error < self.HEADING_ERR_MAX):
                 return True, target_courier.id
           
         return False, None
@@ -648,6 +703,7 @@ class Visualize:
     RED = (255, 0, 0)
     GREEN = (0, 255, 0)
     BLUE = (0, 0, 255)
+    YELLOW = (255, 255, 0)
 
     def __init__(self,
                  map:Map,
@@ -718,7 +774,8 @@ class Visualize:
             # robot pos in pixel coords
             robot_pos = env_map.world_to_map(*courier.position()[:2])
             # draw the robot on the screen
-            pygame.draw.polygon(self.screen, self.BLUE, bbox_map)
+            last_action = courier._last_actions[-1]
+            pygame.draw.polygon(self.screen, self.BLUE if last_action==1 else self.YELLOW, bbox_map)
             pygame.draw.circle(self.screen, self.RED, robot_pos[:2], 5)
             # add robot name
             text_surface = self.font.render(courier.id, True, self.RED)

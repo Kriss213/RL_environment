@@ -85,11 +85,14 @@ class Robot:
         else:
             raise ValueError("Goal must be an instance of Position class.")
 
-    def get_bbox(self, _footrprint:np.ndarray=None) -> np.ndarray:
+    def get_bbox(self, _footrprint:np.ndarray=None, xytheta:Tuple=None) -> np.ndarray:
         """
         Returns the bounding box of the robot.
         """
-        x, y, theta = self.position.x, self.position.y, self.position.theta
+        if xytheta is None:
+            x, y, theta = self.position.x, self.position.y, self.position.theta
+        else:
+            x, y, theta = xytheta
 
         if _footrprint is None:
             _footrprint = self.footprint
@@ -233,19 +236,41 @@ class Robot:
 
     def follow_path(self) -> bool:
         """
-        Follows the path step-by-step using proportional control.
-        Respects heading and distance tolerances.
+        Follows path assuming it has x, y, theta (yaw).
+        
+        Args:
+        :param courier_map: map to check for other couriers to see if following path would cause collision
+        
+        Return:
+        :return moved: True if has path and move is possible
         """
         if self.path:
+            # x, y, theta = self.path[0]
+            # if not self._point_is_free(x,y):
+            #     # lazy but should work :D
+            #     # replace all invalid points with the
+            #     # same point and then just jump to
+            #     # next valid point from STATIC planning map
+            #     for i, (x_, y_, th_) in enumerate(self.path):
+            #         if self._point_is_free(x_, y_):
+            #             break
+            #     if self.logging:
+            #         print(f"[{self.id}] Jumped {i+1} invalid path points.")
+            #     self.path[:i] = [self.path[i]] * i
             self.position.x = self.path[0][0]
             self.position.y = self.path[0][1]
             self.position.theta = self.path[0][2]
             self.path.pop(0)
             return True
-        else:
-            # goal is reached
-            self.clear_goal()
-            return False
+        elif not (self.goal is None):
+            # goal is reached?
+            if self.reached_target(target=self.goal):
+                self.clear_goal()
+            else:
+                # reset goal to replan route
+                # Maybe? possible due to noise?
+                self.goal = self.goal
+        return False
 
     def reached_target(self, target:Position) -> bool:       
         heading_error = (target - self.position).theta
@@ -372,3 +397,13 @@ class Robot:
         """
         rr, cc = line(p1[1], p1[0], p2[1], p2[0])
         return np.all(grid[rr, cc] == self.map.FREE)
+    
+    def _point_is_free(self, x:float, y:float) -> bool:
+        """
+        Chech if point in woorld coordinates is free in planning map.
+        """
+        mx, my = self.map.world_to_map(x,y)
+        mx //= self.map.downsample_factor
+        my //= self.map.downsample_factor
+        return self.planning_map[my,mx] == self.map.FREE
+    

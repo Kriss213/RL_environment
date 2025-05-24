@@ -6,8 +6,13 @@ from src.Robot import Robot
 from src.Classes import Position, Task
 import numpy as np
 from typing import Any
+from collections import deque
+from shapely import Polygon
 
 class Courier(Robot):
+    POSITION_NOISE = 0.05 # +- m
+    HEADING_NOISE = np.deg2rad(5.0) # +- 5 degrees
+    REPLAN_CHANCE = lambda x: np.random.rand() < 0.7 # 70 % chance of path replan
     """
     Courier agent. Inherits robot.
     """
@@ -38,15 +43,20 @@ class Courier(Robot):
         # action metrics/counters
         self._failed_plans_in_row: int = 0
         self._idle_time:float = 0.0
-        self._last_action:int = 0
+        self._last_actions:deque= deque([0], maxlen=20) # 1 init to avoid div by zero when using len() in init stages
         self._path_plan_cooldown_counter:int = 0
         
         # reward metrics/counters
         self._awarded_reached_goal = False
         
-        self._inflated_footprint = self.footprint + self.footprint / 2
-        
+        # sign doesnt matter
+        footprint_dx, footprint_dy = np.min(self.footprint), np.max(self.footprint)
+        radius = np.hypot(footprint_dx, footprint_dy)
+        footprint_inflation_d = np.cos(np.deg2rad(45.0)) * radius
+        self._inflated_footprint = self.footprint + np.where(self.footprint>0, +footprint_inflation_d, -footprint_inflation_d)
+                
         self._other_courier_map:np.ndarray = np.ones_like(self.planning_map) * self.map.FREE # A scaled binary map containint only other couriers
+        self.d_lim_path_blocked:float = 2.0 # distance to check for blocked path
         
 
     def reset(self, pos:Position|Any=None):
@@ -58,45 +68,40 @@ class Courier(Robot):
         
         self._failed_plans_in_row: int = 0
         self._idle_time:float = 0.0
-        self._last_action:int = 0
+        self._last_actions:deque= deque([0], maxlen=20)# 1 init to avoid div by zero when using len() in init stages
         self._path_plan_cooldown_counter:int = 0
         self.reset_planning_map()
-    
-    def _is_path_blocked(self, distance_lim:float=2.0):# -> Tuple[bool, str]:
+        
+    def _is_path_blocked(self):# -> Tuple[bool, str]:
         """
-        Check if in given distance another courier blocks the path
-        **NOTE:** This does not check for static obstacles because DUBINS might add curves that are slightly too close to map obstacles
+        Check if in given distance another courier blocks the path.
         """
         if not self.path:
             return False
         
-        # Make sure that planning map is updated
-        self.update_planning_map()
+        # Get path points in the given distance
+        path = np.array(self.path)
+        path_xy = path[:, :2]
+        path_deltas = np.diff(path_xy, axis=0)
+        segment_lengths = np.linalg.norm(path_deltas, axis=1)
+        total_len = np.sum(segment_lengths)
+        if total_len < self.d_lim_path_blocked:
+            n = len(path)
+        else:
+            cum_dist = np.cumsum(segment_lengths)
+            n = np.searchsorted(cum_dist, self.d_lim_path_blocked, side='right')
+            
+        path_to_check = path[:n]
+        
+        #construct own polygon list
+        poly_list = [Polygon(self.get_bbox(xytheta=(x,y,theta))) for (x,y,theta) in path_to_check]
         
         for target_courier in self.other_couriers:
-            if target_courier.id == self.id:
-                continue
-        
-            path = np.array(self.path)
-            path_xy = path[:, :2]
-            path_deltas = np.diff(path_xy, axis=0)
-            segment_lengths = np.linalg.norm(path_deltas, axis=1)
-            total_len = np.sum(segment_lengths)
-            if total_len < distance_lim:
-                n = len(path)
-            else:
-                cum_dist = np.cumsum(segment_lengths)
-                n = np.searchsorted(cum_dist, distance_lim, side='right')
-                
-            path_to_check = path_xy[:n]
-            
-            # if any of path points cross any obstacle (including inflated), return True
-            for x, y in path_to_check:
-                mx, my = self.map.world_to_map(x,y)
-                # scale map points to planning map
-                mx //= self.map.downsample_factor
-                my //= self.map.downsample_factor
-                if self._other_courier_map[my, mx] != self.map.FREE:
+            other_courier_poly = Polygon(target_courier.get_bbox())
+            # if any future configuration intersects with other robot
+            # return true
+            for p in poly_list:
+                if other_courier_poly.intersects(p):
                     return True
         return False
 
@@ -106,14 +111,20 @@ class Courier(Robot):
         """
         assert action in (0, 1), f"[{self.id}] Invalid action: {action}!"
         
-        self._last_action = action
+        self._last_actions.append(action)
+        
+        # add random noise to agents
+        self._add_noise()
+        
+        # Make sure that planning map is updated
+        self.update_planning_map()
          
         if action == 0:
             self._idle_time += dt
         elif action == 1:
               # Plan path if necessary (max every 10 follow path actions)
             self._path_plan_cooldown_counter += 1
-            if self._should_replan_path():
+            if self._should_replan_path() and self.REPLAN_CHANCE():
                 self._path_plan_cooldown_counter = 0    
                             
                 # update goal to active task (trigger path plan)
@@ -157,12 +168,27 @@ class Courier(Robot):
         self.reset_planning_map()
         # add couriers as obstacles but only if closer than 3 meters
         for c in self.other_couriers:
+            _diff = c.position - self.position
+            dx, dy = _diff.x, _diff.y
+            heading_err = _diff.theta
+            dist_to_other = np.hypot(dx, dy)
             # check distance to self
-            dist = np.hypot(*(self.position()[:2] - c.position()[:2]))
-            if dist < 3.0:
+            #dist = np.hypot(*(self.position()[:2] - c.position()[:2]))
+            if heading_err > 0 or dist_to_other < 5.0:
                 bbox = c.get_bbox(_footrprint=self._inflated_footprint)
                 self.set_obstacle(bbox)
+    
+    def _add_noise(self):
+        """
+        Add noise to robot's properties
+        """
+        self.position.x +=  (2*np.random.rand()-1.0) * self.POSITION_NOISE
+        self.position.y += (2*np.random.rand()-1.0) * self.POSITION_NOISE
+        self.position.theta +=  (2*np.random.rand()-1.0) * self.HEADING_NOISE
         
+    
+    
+    
 class Loader:
     """
     Loaders spawn tasks.
