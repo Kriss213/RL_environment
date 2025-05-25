@@ -20,6 +20,10 @@ from ray.rllib.algorithms.algorithm import Algorithm
 from torch import Tensor
 from typing import Optional
 from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
+from ray.rllib.env.multi_agent_episode import MultiAgentEpisode
+from ray.rllib.env.multi_agent_env import MultiAgentEnv
+
+# logger = MetricsLogger()
 
 class AlgorithmFix(RLlibCallback):
     def __init__(self, **kwargs):
@@ -34,6 +38,29 @@ class AlgorithmFix(RLlibCallback):
             if not param_grp['capturable'] and isinstance(param_grp["betas"][0], Tensor):
                 param_grp["betas"] = tuple(beta.item() for beta in param_grp["betas"])
         algorithm.learner_group.foreach_learner(betas_tensor_to_float)
+    
+    def on_episode_end(
+        self,
+        *,
+        episode:MultiAgentEpisode,
+        env_runner,
+        metrics_logger:MetricsLogger,
+        env,
+        env_index,
+        rl_module,
+        **kwargs,
+    ) -> None:
+        last_info = episode.get_infos(-1)
+        episode_sim_time = last_info['R1']['elapsed_sim_time']
+        #metrics_logger.log_value(f'elapsed_sim_time', episode_sim_time)
+        episode.custom_metrics['elapsed_sim_time'] = episode_sim_time
+        
+        # get delivered packages per agent
+        for key, val in last_info.values():
+            if key.startswith('R'):
+                #metrics_logger.log_value(f'delivered_packages/{key}', val)
+                episode.custom_metrics[f'delivered_packages/{key}'] = val
+            
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -59,22 +86,22 @@ if __name__ == "__main__":
         PPOConfig()
         .environment(env="warehouse_env", env_config=env_config)
         .framework("torch")
-        .env_runners(num_env_runners=20, num_envs_per_env_runner=1, num_cpus_per_env_runner=1)
+        .env_runners(num_env_runners=8, num_envs_per_env_runner=3, num_cpus_per_env_runner=3)
         .resources(num_cpus_for_main_process=0)
         .learners(num_gpus_per_learner=1)
         .training(
             use_critic=True,
             gamma=0.995,
             lambda_=0.95,
-            lr=1e-4,
+            lr=1e-3,
             clip_param=0.2,
-            entropy_coeff=[[0, 0.01], [2e6,0.0001]],
+            entropy_coeff=0.01,#[[0, 0.01], [0, 0.01] [2e6,0.0001]],
             kl_coeff=0.5,
             kl_target=0.005,
             train_batch_size=16_000,
-            minibatch_size=2_048,
-            num_epochs=10,
-            vf_clip_param=1000.0, # should be bit larger than realistic mean episode return
+            minibatch_size=4_096,
+            num_epochs=20,
+            vf_clip_param=1000.0,
             vf_loss_coeff=0.25,
             model={
                 "fcnet_activation": "relu",
@@ -88,20 +115,13 @@ if __name__ == "__main__":
             },
             policy_mapping_fn=lambda agent_id, *args, **kwargs: "shared_policy"
         )
-        .evaluation(
-            evaluation_interval=100,
-            evaluation_duration=3,
-            evaluation_config={
-                "explore": True,
-            }
-        )
     )
-    iterations = 500
+    iterations = 1000
     run_config = tune.RunConfig(
-        name=f"parallel_warehouse_marl_train_24_05_{iterations}",
+        name=f"final_train_{iterations}",
         stop={"training_iteration": iterations},
         checkpoint_config=tune.CheckpointConfig(
-            checkpoint_frequency=5,
+            checkpoint_frequency=1,
             checkpoint_at_end=True,
         )
     )

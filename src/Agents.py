@@ -48,6 +48,9 @@ class Courier(Robot):
         
         # reward metrics/counters
         self._awarded_reached_goal = False
+        self.replanned_this_step = False
+        self.was_blocked_last_step = False
+        self.packages_delivered: int = 0
         
         # sign doesnt matter
         footprint_dx, footprint_dy = np.min(self.footprint), np.max(self.footprint)
@@ -109,50 +112,57 @@ class Courier(Robot):
         """
         Perform an action.
         """
-        assert action in (0, 1), f"[{self.id}] Invalid action: {action}!"
+        assert action in (0, 1, 2), f"[{self.id}] Invalid action: {action}!"
         
         self._last_actions.append(action)
+        
+        # later set to true if replanned
+        self.replanned_this_step = False
         
         # add random noise to agents
         self._add_noise()
         
         # Make sure that planning map is updated
         self.update_planning_map()
-         
+        
+        # set flag if agent was blocked before performing action
+        self.was_blocked_last_step = self._is_path_blocked()
+        
         if action == 0:
             self._idle_time += dt
         elif action == 1:
-              # Plan path if necessary (max every 10 follow path actions)
-            self._path_plan_cooldown_counter += 1
-            if self._should_replan_path() and self.REPLAN_CHANCE():
-                self._path_plan_cooldown_counter = 0    
-                            
-                # update goal to active task (trigger path plan)
-                if self.active_task:
-                    self.goal = self.active_task.active_goal
-                            
-                if self.path:
-                    self._failed_plans_in_row = 0    
-                    # when there is new path, clear goal reached reward flag
-                    self._awarded_reached_goal = False
-                else:
-                    self._failed_plans_in_row += 1
-                
-            
             self._idle_time = 0.0 if self.follow_path() else self._idle_time+dt
+        elif action == 2:
+            # Plan path if necessary (max every 10 follow path actions)
+            #self._path_plan_cooldown_counter += 1
+            #if self._should_replan_path() and self.REPLAN_CHANCE():
+            #self._path_plan_cooldown_counter = 0    
+                            
+            # update goal to active task (trigger path plan)
+            if self.active_task:
+                self.goal = self.active_task.active_goal
+                self.replanned_this_step = True
+                        
+            if self.path:
+                self._failed_plans_in_row = 0    
+                # when there is new path, clear goal reached reward flag
+                self._awarded_reached_goal = False
+            else:
+                self._failed_plans_in_row += 1
+                
                    
-    def _should_replan_path(self) -> bool:
-        is_blocked = self._is_path_blocked()
-        if is_blocked:
-            # wait for replan
-            self.clear_goal()
-        if not self.active_task:
-            return False
+    # def _should_replan_path(self) -> bool:
+    #     is_blocked = self.was_blocked_last_step
+    #     if is_blocked:
+    #         # wait for replan
+    #         self.clear_goal()
+    #     if not self.active_task:
+    #         return False
         
-        cond_no_path = self.active_task.active_goal and not self.path
-        cond_not_loading = not (self.active_task.status in (Task.AT_PICKUP, Task.AT_DROPOFF))
-        cond_cooldown_pass = self._path_plan_cooldown_counter >= 10 or self._path_plan_cooldown_counter == 0
-        return (cond_no_path or is_blocked) and cond_not_loading and cond_cooldown_pass
+    #     cond_no_path = self.active_task.active_goal and not self.path
+    #     cond_not_loading = not (self.active_task.status in (Task.AT_PICKUP, Task.AT_DROPOFF))
+    #     cond_cooldown_pass = self._path_plan_cooldown_counter >= 10 or self._path_plan_cooldown_counter == 0
+    #     return (cond_no_path or is_blocked) and cond_not_loading and cond_cooldown_pass
 
     def set_obstacle(self, bounding_box):
         mask = super().set_obstacle(bounding_box)

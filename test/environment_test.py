@@ -20,6 +20,7 @@ from ray.tune.registry import register_env
 from ray.rllib.core.rl_module import RLModule
 
 import numpy as np
+import json
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -86,9 +87,13 @@ if __name__ == "__main__":
                 episode_reward[c] += r
                 
             if terminated["__all__"]:
+                print(f"Last info:")
+                print(json.dumps(info, indent=4))
                 print(f"Episode length: {episode_len} steps")
                 for c, r in episode_reward.items():
-                    print(f"[{c}] Mean reward: {(r/episode_len):.4f}")
+                    ag_r = episode_reward[c]
+                    print(f"[{c}] Mean reward: {(ag_r/episode_len):.4f}")
+                    print(f"Agent last episode reward: {rewards[c]}")
                 
                 episode_len = 0
                 episode_reward = {c: 0 for c in agents}

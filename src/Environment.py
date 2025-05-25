@@ -13,7 +13,7 @@ from copy import deepcopy
 
 from src.Agents import Courier, Loader, Unloader
 from src.Map import Map
-from src.Classes import Position, TaskAllocator
+from src.Classes import Position, TaskAllocator, Task
 
 import pygame
 import numpy as np
@@ -161,19 +161,21 @@ class WarehouseEnv(MultiAgentEnv):
         
         # Default weights – override in call if needed
         self.DEFAULT_W = dict(
-            progress            = 3.0,   # reward per delta progress to goal
-            goal_arrival        = 60.0,  # one-time bonus when dx & dy both ~0
-            collision           = -50.0,
-            yielding            = 2.0,   # avoided collision by yielding
-            correct_move_reward = 2.0,   # reward agent when following path when it should
+            progress            = 1.0,      # reward per delta progress to goal
+            goal_arrival        = 60.0,     # one-time bonus when dx & dy both ~0
+            collision           = -30.0,
+            yielding            = 2.0,      # avoided collision by yielding
+            correct_move_reward = 0.5,      # reward agent when following path when it should
             idle_penalty        = -0.5,     # per step when WAIT without good reason
-            front_not_busy_penalty  = -5.0,     # waiting while nothing blocks front
+            front_not_busy_penalty  = -0.15,     # waiting while nothing blocks front
             blocking_penalty    = -1.0,     # is blocking somebody else
             follow_dist_penalty = -0.5,     # tail-gating, dist < safe
             move_when_busy_penalty   = -0.2,    # FOLLOW_PATH but is either loading or unloading
             time_penalty        = -0.05,    # single time step penalty
             unblocking_bonus    = 1.0,      # reward agents unblocking
-            failed_plan_penalty = -5.0,      # penalize attempted move that lead to failed replan
+            replan_penalty      = -2.5,     # discourage frequent replans
+            wait_clears_block_bonus= +4.0,  # reward patient yielding
+            correct_replan      = +4.0,     # awarded when replan was necessary
         )
         self.APPROX_MAX_REWARD = sum([w for w in self.DEFAULT_W.values() if w>0])
         
@@ -194,7 +196,7 @@ class WarehouseEnv(MultiAgentEnv):
         self._previous_observations:dict = {c.id: [0]*obs_len for c in self.couriers}
         
         # Action space
-        self.single_action_space = gym.spaces.Discrete(2) # 0 - idle, 1 - follow path
+        self.single_action_space = gym.spaces.Discrete(3) # 0 - idle, 1 - follow path, 2 - replan path
 
         self.action_spaces = {
             c.id: deepcopy(self.single_action_space)
@@ -433,14 +435,14 @@ class WarehouseEnv(MultiAgentEnv):
         
         # return observation dict and infos dict.
         observations = {}
-        infos = {}
+        self.infos:dict = {}
         for courier in self.couriers:
             observations[courier.id] = self._get_obs(courier)
-            infos[courier.id] = {}
+            self.infos[courier.id] = {'delivered_packages': 0, 'elapsed_sim_time': 0}
 
         self.episode_steps = 0
 
-        return observations, infos
+        return observations, self.infos
         
     def step(self, action_dict):
         """
@@ -488,10 +490,14 @@ class WarehouseEnv(MultiAgentEnv):
                 collided=collision,
                 action=action)
             
+            # update infos dict
+            if courier.active_task and courier.active_task.status == Task.DELIVERED:
+                self.infos[c_id]['delivered_packages'] += 1
+            self.infos[c_id]['elapsed_sim_time'] += self.dt
             
             # save as previous obs
             self._previous_observations[c_id] = new_obs
-        
+                
         # RLlib requires "__all__" key in done dict
         hard_limits_met, limits = self._check_hard_limits()
         terminateds["__all__"] = hard_limits_met or collided_at_least_once
@@ -502,7 +508,7 @@ class WarehouseEnv(MultiAgentEnv):
         if self.visualizer:
             self.render()
         
-        return obs, rewards, terminateds, truncateds, infos
+        return obs, rewards, terminateds, truncateds, self.infos
 
     def render(self):
         """
@@ -566,30 +572,16 @@ class WarehouseEnv(MultiAgentEnv):
 
             # discourage waiting when there is path
             # and front is not blocked
-            if front_busy < 0.5 and new_obs[IDX["rem_path_len"]] < 1e-3:
+            if front_busy < 0.5 and new_obs[IDX["rem_path_len"]] > 1e-3:
                 r += w["front_not_busy_penalty"]
+
+              
+            # reward patient waiting that solved the block
+            if (prev_obs[IDX["front_busy"]] > 0.5          # was blocked last step
+                and new_obs[IDX["front_busy"]] < 0.5       # now front is clear
+                and courier._last_actions[-1] == 0):       # and agent chose WAIT
                 
-            # reward collision avoidance by yielding
-            # but only if not blocking the agent it is yielding
-            #       |----|      |----|
-            #    a1 | -> |      | <- | a2   -> no reward
-            #       |----|      |----|
-            
-            #       |----|      |-|--|
-            #    a1 | -> |      | V  | a2   -> reward a1 for yielding
-            #       |----|      |----|
-            # BUT only if the blocked agent is moving
-            # otherwise agents learn to stand still in a jam
-            for other_c in courier.other_couriers:
-                #is a2 blocking a1?
-                if courier.id in self.agent_blocking_map[other_c.id]:
-                    # is a1 NOT blocking a2?
-                    if not (other_c.id in self.agent_blocking_map[courier.id]) \
-                        and other_c._last_actions.count(1) / len(other_c._last_actions) <= 1-self.LAST_ACTIONS_WAIT_THRESHOLD:
-                            # assume that agent is moving if in last actions at least 50% is follow path
-                        r += w["yielding"]
-                        break
-                    
+                r += w["wait_clears_block_bonus"]      
                 
         elif action == 1: # FOLLOW_PATH
             # discourage attempting to move when
@@ -598,15 +590,27 @@ class WarehouseEnv(MultiAgentEnv):
                 r += w["move_when_busy_penalty"]
             else:
                 # reward following path when not blocked or not at loader/unloader
-                if front_busy < 0.5 and new_obs[IDX["rem_path_len"]] > 0:
+                if front_busy < 0.5 and new_obs[IDX["rem_path_len"]] > 1e-4:
                     r += w["correct_move_reward"]
                     
-                # penalize not having path (failed replans)
-                # and not being at goal
-                if new_obs[IDX['rem_path_len']] < 1e-4:
-                    r+= w['failed_plan_penalty']
+                else:
+                    # penalze moving when front is blocked or there is no path:
+                    r += w["move_when_busy_penalty"]
                     
-
+                
+        elif action == 2:
+            # Reward if there was no path, path was blocked
+            # and agent is not at goal. Reward if replan was sucessfull
+            had_path_previously = prev_obs[IDX['rem_path_len']] > 1e-4
+            has_path_now = new_obs[IDX['rem_path_len']] > 1e-4
+            if courier.was_blocked_last_step \
+                or (not had_path_previously and has_path_now) \
+                and not at_goal:
+                
+                r+= w['correct_replan']    
+            else:
+                r += w['replan_penalty']
+        
         # ------------------------------------------------------------------ #
         # 4) Social-safety shaping
         if new_obs[IDX["blocking_other"]] > 0.5:

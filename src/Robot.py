@@ -61,7 +61,7 @@ class Robot:
         self.failed_path_plan_attempts = 0
         
         self.turn_radius:float = turn_radius
-        self.planner_dubins = Dubins(self.turn_radius, point_separation=0.2)
+        self.planner_dubins = Dubins(self.turn_radius, point_separation=0.1)
                 
     @property
     def goal(self) -> Position:

@@ -198,6 +198,7 @@ class TaskAllocator:
             elif task_status == active_task.DELIVERED:
                 active_task.end_time = self.runtime
                 courier.active_task = None
+                courier.packages_delivered += 1
                 active_task.loader.tasks.remove(active_task) # remove task from loader
                 self.delivered_tasks += 1
                 if self.logging:
