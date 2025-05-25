@@ -50,16 +50,17 @@ class AlgorithmFix(RLlibCallback):
         rl_module,
         **kwargs,
     ) -> None:
+        # TODO why doesn't this callback work?
         last_info = episode.get_infos(-1)
         episode_sim_time = last_info['R1']['elapsed_sim_time']
         #metrics_logger.log_value(f'elapsed_sim_time', episode_sim_time)
-        episode.custom_metrics['elapsed_sim_time'] = episode_sim_time
+        episode.custom_data['elapsed_sim_time'] = episode_sim_time
         
         # get delivered packages per agent
         for key, val in last_info.values():
             if key.startswith('R'):
                 #metrics_logger.log_value(f'delivered_packages/{key}', val)
-                episode.custom_metrics[f'delivered_packages/{key}'] = val
+                episode.custom_data[f'delivered_packages/{key}'] = val
             
 
 if __name__ == "__main__":
@@ -85,8 +86,8 @@ if __name__ == "__main__":
     config = (
         PPOConfig()
         .environment(env="warehouse_env", env_config=env_config)
-        .framework("torch")
-        .env_runners(num_env_runners=8, num_envs_per_env_runner=3, num_cpus_per_env_runner=3)
+        .framework("torch") # TODO env params in config
+        .env_runners(num_env_runners=6, num_envs_per_env_runner=4, num_cpus_per_env_runner=4, sample_timeout_s=None)
         .resources(num_cpus_for_main_process=0)
         .learners(num_gpus_per_learner=1)
         .training(

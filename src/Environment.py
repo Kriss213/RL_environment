@@ -164,7 +164,6 @@ class WarehouseEnv(MultiAgentEnv):
             progress            = 1.0,      # reward per delta progress to goal
             goal_arrival        = 60.0,     # one-time bonus when dx & dy both ~0
             collision           = -30.0,
-            yielding            = 2.0,      # avoided collision by yielding
             correct_move_reward = 0.5,      # reward agent when following path when it should
             idle_penalty        = -0.5,     # per step when WAIT without good reason
             front_not_busy_penalty  = -0.15,     # waiting while nothing blocks front
@@ -176,6 +175,7 @@ class WarehouseEnv(MultiAgentEnv):
             replan_penalty      = -2.5,     # discourage frequent replans
             wait_clears_block_bonus= +4.0,  # reward patient yielding
             correct_replan      = +4.0,     # awarded when replan was necessary
+            proximity_penalty   = -2.0,     # encourage agents to keep distance
         )
         self.APPROX_MAX_REWARD = sum([w for w in self.DEFAULT_W.values() if w>0])
         
@@ -450,9 +450,10 @@ class WarehouseEnv(MultiAgentEnv):
         
         :param action_dict: Dictionary of agent actions like:
         
-        courier.id : 0 or 1
+        courier.id : 0 | 1 | 2
         0 - wait
-        1 - follow path 
+        1 - follow path
+        2 - replan path
         """
 
         # Empty return dicts
@@ -535,6 +536,12 @@ class WarehouseEnv(MultiAgentEnv):
         GOAL_THRESH = self.GOAL_THRESH
         IDLE_PATIENCE = self.IDLE_PATIENCE
         SAFE_FOLLOW_DIST = self.SAFE_FOLLOW_DIST
+        d_safe = 3.0
+        dx = lambda c1, c2: c1.position.x - c2.position.x
+        dy = lambda c1, c2: c1.position.y - c2.position.y
+        courier_dists = {c1 : np.hypot(dx(c1,courier), dy(c1, courier)) for c1 in self.couriers if c1.id != courier.id}
+        dist_min = min(courier_dists.values())
+        
         r = 0.0
 
         r += w['time_penalty']
@@ -581,7 +588,12 @@ class WarehouseEnv(MultiAgentEnv):
                 and new_obs[IDX["front_busy"]] < 0.5       # now front is clear
                 and courier._last_actions[-1] == 0):       # and agent chose WAIT
                 
-                r += w["wait_clears_block_bonus"]      
+                r += w["wait_clears_block_bonus"]
+            
+            # reward waiting if other courier is closer to goal
+            # with respoect to how far it is
+            # TODO
+            
                 
         elif action == 1: # FOLLOW_PATH
             # discourage attempting to move when
@@ -607,7 +619,10 @@ class WarehouseEnv(MultiAgentEnv):
                 or (not had_path_previously and has_path_now) \
                 and not at_goal:
                 
-                r+= w['correct_replan']    
+                # minimize reward if agents are in close proximity
+                ratio = np.clip(dist_min / d_safe, 0.0, 1.0)
+                scaled_bonus = w['correct_replan'] * (ratio ** 1.5)
+                r += scaled_bonus    
             else:
                 r += w['replan_penalty']
         
@@ -622,6 +637,10 @@ class WarehouseEnv(MultiAgentEnv):
         # being too close to other agent that is being followed
         if new_obs[IDX["closest_front_dist"]] < SAFE_FOLLOW_DIST:
             r += w["follow_dist_penalty"]
+            
+        # general proximity penalty
+        if dist_min < d_safe:
+            r += w['proximity_penalty'] * (1 - dist_min/d_safe)
 
         return float(r / self.APPROX_MAX_REWARD)
 
@@ -708,6 +727,7 @@ class Visualize:
     GREEN = (0, 255, 0)
     BLUE = (0, 0, 255)
     YELLOW = (255, 255, 0)
+    CYAN = (0, 255, 255)
 
     def __init__(self,
                  map:Map,
@@ -779,6 +799,7 @@ class Visualize:
             robot_pos = env_map.world_to_map(*courier.position()[:2])
             # draw the robot on the screen
             last_action = courier._last_actions[-1]
+            color= self.YELLOW if last_action == 0 else self.BLUE if last_action==1 else self.CYAN if last_action == 2 else self.BLUE
             pygame.draw.polygon(self.screen, self.BLUE if last_action==1 else self.YELLOW, bbox_map)
             pygame.draw.circle(self.screen, self.RED, robot_pos[:2], 5)
             # add robot name
